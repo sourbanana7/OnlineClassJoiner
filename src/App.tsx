@@ -32,6 +32,7 @@ import {
 import { ClassCard } from './components/ClassCard';
 import { TimePicker } from './components/TimePicker';
 import { LiveConsole } from './components/LiveConsole';
+import { NonPcModal } from './components/NonPcModal';
 
 export const App: React.FC = () => {
   const [classes, setClasses] = useState<ClassSchedule[]>([]);
@@ -904,6 +905,8 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Mobile / Non-PC Device Guidance Alert Popup */}
+      <NonPcModal />
     </div>
   );
 };
