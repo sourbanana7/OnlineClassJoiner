@@ -3,6 +3,7 @@
 
 import { chromium, BrowserContext, Page } from 'playwright';
 import * as fs from 'fs';
+import * as path from 'path';
 import {
   AppSettings,
   BotStatusPayload,
@@ -75,7 +76,7 @@ export class AutomationEngine {
   }
 
   /**
-   * Resolves a system browser executable on Linux/Windows if available to ensure
+   * Resolves a system browser executable on Linux/Windows/macOS if available to ensure
    * smooth Google OAuth login, or gracefully falls back to bundled Playwright Chromium.
    */
   private detectSystemBrowserExecutable(): string | undefined {
@@ -85,7 +86,16 @@ export class AutomationEngine {
             'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
             'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
             `${process.env.LOCALAPPDATA || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env.PROGRAMFILES || ''}\\Google\\Chrome\\Application\\chrome.exe`,
             'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+            'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+          ]
+        : process.platform === 'darwin'
+        ? [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+            '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
           ]
         : [
             '/usr/bin/google-chrome-stable',
@@ -93,6 +103,7 @@ export class AutomationEngine {
             '/usr/bin/chromium',
             '/usr/bin/chromium-browser',
             '/usr/bin/brave-browser',
+            '/snap/bin/chromium',
           ];
 
     for (const candidate of candidates) {
@@ -104,7 +115,56 @@ export class AutomationEngine {
   }
 
   /**
+   * Removes stale Chromium singleton lock and socket files from the profile directory.
+   */
+  private cleanStaleProfileLocks(userDataDir: string): void {
+    try {
+      if (!fs.existsSync(userDataDir)) {
+        fs.mkdirSync(userDataDir, { recursive: true });
+        return;
+      }
+
+      const lockFiles = [
+        'SingletonLock',
+        'SingletonCookie',
+        'SingletonSocket',
+        'parent.lock',
+      ];
+
+      for (const file of lockFiles) {
+        const fullPath = path.join(userDataDir, file);
+        if (fs.existsSync(fullPath)) {
+          try {
+            fs.rmSync(fullPath, { force: true, recursive: true });
+          } catch {
+            // Actively locked by running instance
+          }
+        }
+      }
+
+      // Check for any globbed SingletonSocket-* socket files
+      try {
+        const entries = fs.readdirSync(userDataDir);
+        for (const entry of entries) {
+          if (entry.startsWith('SingletonSocket') || entry.startsWith('SingletonLock')) {
+            try {
+              fs.rmSync(path.join(userDataDir, entry), { force: true, recursive: true });
+            } catch {
+              // Ignore
+            }
+          }
+        }
+      } catch {
+        // Ignore read errors
+      }
+    } catch {
+      // Ignore directory level errors
+    }
+  }
+
+  /**
    * Launches or reuses the persistent Chromium profile.
+   * Handles remote debugging CDP reconnection, stale lock cleaning, and crash resilience.
    */
   private async ensurePersistentContext(): Promise<BrowserContext> {
     if (this.context) {
@@ -114,6 +174,7 @@ export class AutomationEngine {
         return this.context;
       } catch {
         this.context = null;
+        this.activePage = null;
       }
     }
 
@@ -131,19 +192,9 @@ export class AutomationEngine {
     }
 
     const userDataDir = this.store.getProfileDirectory();
-    const executablePath = this.detectSystemBrowserExecutable();
+    this.cleanStaleProfileLocks(userDataDir);
 
-    // Remove stale Chromium singleton locks if previous session closed abruptly
-    for (const lockFile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-      const fullPath = `${userDataDir}/${lockFile}`;
-      if (fs.existsSync(fullPath)) {
-        try {
-          fs.unlinkSync(fullPath);
-        } catch {
-          // Ignore if actively locked
-        }
-      }
-    }
+    const executablePath = this.detectSystemBrowserExecutable();
 
     const launchOptions: Parameters<typeof chromium.launchPersistentContext>[1] = {
       headless: false,
@@ -157,6 +208,8 @@ export class AutomationEngine {
         '--use-fake-ui-for-media-stream',
         '--disable-infobars',
         '--no-default-browser-check',
+        '--disable-session-crashed-bubble',
+        '--disable-features=TranslateUI',
       ],
     };
 
@@ -167,7 +220,17 @@ export class AutomationEngine {
       this.log('info', 'Launching bundled Playwright Chromium engine...');
     }
 
-    this.context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+    try {
+      this.context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+    } catch (launchErr: any) {
+      this.log(
+        'warn',
+        `Browser launch attempt encountered: ${launchErr?.message || String(launchErr)}. Cleaning stale locks and retrying...`
+      );
+      this.cleanStaleProfileLocks(userDataDir);
+      await this.sleep(1000);
+      this.context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+    }
 
     // Mask automation fingerprint so Google Workspace login never blocks sign-in
     await this.context.addInitScript(() => {
@@ -197,10 +260,22 @@ export class AutomationEngine {
 
   /**
    * Searches all open tabs across the browser context to find an existing Google Classroom,
-   * Google Accounts, or relevant page. Prioritizes Classroom tabs, then login tabs, then blank tabs.
+   * Google Meet, Google Accounts, or blank tab. Gracefully reuses open pages to prevent tab bloat.
    */
   public findExistingPage(context: BrowserContext, targetUrlSubstring?: string): Page | null {
-    const pages = context.pages().filter((p) => !p.isClosed());
+    let pages: Page[] = [];
+    try {
+      pages = context.pages().filter((p) => {
+        try {
+          return !p.isClosed();
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return null;
+    }
+
     if (pages.length === 0) return null;
 
     // 1. Look for specific target URL match if provided
@@ -227,18 +302,7 @@ export class AutomationEngine {
       }
     }
 
-    // 3. Look for an existing tab on Google Accounts / login
-    for (const p of pages) {
-      try {
-        if (p.url().includes('accounts.google.com')) {
-          return p;
-        }
-      } catch {
-        // Ignore
-      }
-    }
-
-    // 4. Look for an existing Google Meet tab
+    // 3. Look for an existing Google Meet tab
     for (const p of pages) {
       try {
         if (p.url().includes('meet.google.com')) {
@@ -249,11 +313,22 @@ export class AutomationEngine {
       }
     }
 
-    // 5. Look for an empty/blank tab that can be repurposed without opening a new window/tab
+    // 4. Look for an existing tab on Google Accounts / login
+    for (const p of pages) {
+      try {
+        if (p.url().includes('accounts.google.com')) {
+          return p;
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
+    // 5. Look for an empty/blank tab that can be repurposed without opening a new tab
     for (const p of pages) {
       try {
         const u = p.url();
-        if (u === 'about:blank' || u === '') {
+        if (u === 'about:blank' || u === '' || u.startsWith('chrome://newtab')) {
           return p;
         }
       } catch {
@@ -262,6 +337,74 @@ export class AutomationEngine {
     }
 
     return null;
+  }
+
+  /**
+   * Reuses an existing open tab or safely allocates a new page in the given context.
+   */
+  private async getOrCreateUsablePage(
+    context: BrowserContext,
+    targetUrlSubstring?: string
+  ): Promise<Page> {
+    // 1. Check if existing activePage is still valid and alive
+    if (this.activePage) {
+      try {
+        if (!this.activePage.isClosed()) {
+          if (targetUrlSubstring && this.activePage.url().includes(targetUrlSubstring)) {
+            await this.activePage.bringToFront().catch(() => {});
+            return this.activePage;
+          }
+        }
+      } catch {
+        this.activePage = null;
+      }
+    }
+
+    // 2. Search context for a suitable open tab
+    const matched = this.findExistingPage(context, targetUrlSubstring);
+    if (matched) {
+      this.activePage = matched;
+      await matched.bringToFront().catch(() => {});
+      this.setupPageErrorHandlers(matched);
+      return matched;
+    }
+
+    // 3. Check for any blank tab in context
+    try {
+      const openPages = context.pages().filter((p) => !p.isClosed());
+      const blankPage = openPages.find((p) => {
+        try {
+          const u = p.url();
+          return u === 'about:blank' || u === '' || u.startsWith('chrome://newtab');
+        } catch {
+          return false;
+        }
+      });
+      if (blankPage) {
+        this.activePage = blankPage;
+        await blankPage.bringToFront().catch(() => {});
+        this.setupPageErrorHandlers(blankPage);
+        return blankPage;
+      }
+    } catch {
+      // Ignore
+    }
+
+    // 4. Create new page if needed
+    const newPage = await context.newPage();
+    this.activePage = newPage;
+    await newPage.bringToFront().catch(() => {});
+    this.setupPageErrorHandlers(newPage);
+    return newPage;
+  }
+
+  private setupPageErrorHandlers(page: Page): void {
+    page.on('crash', () => {
+      this.log('warn', 'Browser tab crashed unexpectedly.');
+      if (this.activePage === page) {
+        this.activePage = null;
+      }
+    });
   }
 
   /**
@@ -286,10 +429,10 @@ export class AutomationEngine {
 
         // Check for Google account avatar, course cards, or classroom main header
         const hasAccountAvatar = !!document.querySelector(
-          '[aria-label*="Google Account" i], [aria-label*="Google-konto" i], a[href*="SignOutOptions"], img[src*="googleusercontent.com"]'
+          '[aria-label*="Google Account" i], [aria-label*="Google-konto" i], [aria-label*="Cuenta de Google" i], a[href*="SignOutOptions"], img[src*="googleusercontent.com"]'
         );
         const hasCoursesOrClasses = !!document.querySelector(
-          'a[href*="/c/"], [data-course-id], .YVvGBb, main, [role="main"]'
+          'a[href*="/c/"], [data-course-id], .YVvGBb, main, [role="main"], [role="listitem"]'
         );
         const hasGoogleBar = !!document.querySelector('header, [role="banner"]');
 
@@ -305,11 +448,8 @@ export class AutomationEngine {
   /**
    * Opens or checks Google Classroom authentication:
    * 1. Checks for already opened browser windows/tabs first.
-   * 2. If an existing window is found:
-   *    - Brings it to the front instead of opening another window.
-   *    - If already logged in, verifies the session immediately.
-   *    - If not logged in, points it to the login page in the same window.
-   * 3. Only opens a new window/tab if no relevant browser window is currently open.
+   * 2. Brings existing window to front instead of opening duplicates.
+   * 3. Verifies session automatically and saves auth status.
    */
   public async openGoogleAuthentication(): Promise<void> {
     try {
@@ -322,29 +462,7 @@ export class AutomationEngine {
       this.log('info', 'Checking for opened Google Classroom windows and tabs first...');
 
       const context = await this.ensurePersistentContext();
-
-      // Step 1: Check for an already opened page in the browser
-      let page = this.findExistingPage(context, 'classroom.google.com') ||
-                 this.findExistingPage(context, 'accounts.google.com');
-
-      if (page) {
-        this.activePage = page;
-        await page.bringToFront();
-        this.log('info', `Found opened browser window (${page.url()}). Brought to front instead of opening a new one.`);
-      } else {
-        // No Classroom/Account tab open. Check if we have any open tab in context to reuse
-        const pages = context.pages().filter((p) => !p.isClosed());
-        if (pages.length > 0) {
-          page = pages[0];
-          this.activePage = page;
-          await page.bringToFront();
-          this.log('info', 'Reusing existing browser window instead of opening another window.');
-        } else {
-          this.log('info', 'No opened browser window found. Opening browser for authentication...');
-          page = await context.newPage();
-          this.activePage = page;
-        }
-      }
+      const page = await this.getOrCreateUsablePage(context, 'classroom.google.com');
 
       // Step 2: Check current page URL & authentication status
       const currentUrl = page.url();
@@ -374,7 +492,7 @@ export class AutomationEngine {
         });
       }
 
-      await page.bringToFront();
+      await page.bringToFront().catch(() => {});
 
       // Step 4: Check if login was preserved/instant
       await this.sleep(2500);
@@ -431,8 +549,8 @@ export class AutomationEngine {
    * Core "Refresh & Scan" Engine:
    * 1. Navigates to the course's Google Classroom URL.
    * 2. Scans the DOM for an active Google Meet link (banner button or stream post).
-   * 3. If not found, refreshes every 30 seconds for up to 5 minutes.
-   * 4. Once found, navigates to Meet, turns off Mic & Camera, and clicks "Join now".
+   * 3. If not found, refreshes every interval seconds for up to maxScanDuration.
+   * 4. Once found, navigates to Meet, mutes Mic & Cam, and joins the session.
    */
   public async runClassJoinWorkflow(cls: ClassSchedule): Promise<void> {
     if (
@@ -464,19 +582,7 @@ export class AutomationEngine {
       );
 
       const context = await this.ensurePersistentContext();
-      let page = this.findExistingPage(context, cls.classroomUrl) ||
-                 this.findExistingPage(context, 'classroom.google.com');
-
-      if (page) {
-        this.activePage = page;
-        await page.bringToFront();
-        this.log('info', 'Found opened browser window. Reusing without opening another window.', cls.courseCode);
-      } else {
-        const pages = context.pages().filter((p) => !p.isClosed());
-        page = pages.length > 0 ? pages[0] : await context.newPage();
-        this.activePage = page;
-        await page.bringToFront();
-      }
+      const page = await this.getOrCreateUsablePage(context, cls.classroomUrl);
 
       let meetUrl: string | null = null;
 
@@ -588,61 +694,339 @@ export class AutomationEngine {
   }
 
   /**
-   * Scans the Google Classroom DOM for both:
-   * 1. The dedicated Classroom Header Banner Meet button (`a[href*="meet.google.com"]`)
-   * 2. Stream announcement links or text containing a valid Google Meet URL
+   * Resilient Google Meet Link Discovery Engine:
+   * Accurately detects:
+   * Tier 1: Dedicated Top Banner Meet button / cards (official header Meet link).
+   * Tier 2: Stream announcements and posts in chronological order (direct links, Google redirect links, or raw text).
+   * Tier 3: DOM-wide anchor and text fallback.
+   * Supports standard codes (xxx-yyyy-zzz), lookup links (lookup/abc), and URL-encoded redirects.
    */
-  private async scanClassroomDomForMeetLink(page: Page): Promise<string | null> {
+  public async scanClassroomDomForMeetLink(page: Page): Promise<string | null> {
     try {
-      // Allow directly testing with a meet.google.com URL if user entered one
+      // If current page is already a valid Meet URL, return it immediately
       const currentUrl = page.url();
-      if (/https?:\/\/meet\.google\.com\/([a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[^\s/?#]+)/i.test(currentUrl)) {
+      if (/https?:\/\/meet\.google\.com\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[^\s/?#]+|[a-zA-Z0-9_-]{10,})/i.test(currentUrl)) {
         return currentUrl;
       }
 
       const foundLink = await page.evaluate(() => {
         const meetRegex =
-          /https?:\/\/meet\.google\.com\/([a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]{10,})/i;
+          /https?:\/\/meet\.google\.com\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]{10,})(?:\?[^\s"'<>]*)?/i;
+        const rawCodeRegex = /\b([a-z]{3}-[a-z]{4}-[a-z]{3})\b/i;
 
-        // 1. Check all anchor tags with href containing meet.google.com
-        const anchors = Array.from(
-          document.querySelectorAll<HTMLAnchorElement>('a[href*="meet.google.com"]')
+        const cleanAndValidate = (urlCandidate: string): string | null => {
+          if (!urlCandidate) return null;
+          let cleaned = urlCandidate.trim();
+
+          // Strip wrapping quotes, brackets, or trailing punctuation
+          cleaned = cleaned.replace(/^["'(<[]+|[.,)"'>\]]+$/g, '');
+
+          // Decode URL if it's a Google redirect link (google.com/url?q=...)
+          if (cleaned.includes('google.com/url?') || cleaned.includes('/url?q=')) {
+            try {
+              const urlObj = new URL(cleaned);
+              const qParam = urlObj.searchParams.get('q');
+              if (qParam) {
+                cleaned = decodeURIComponent(qParam);
+              }
+            } catch {
+              const qMatch = cleaned.match(/[?&]q=([^&]+)/);
+              if (qMatch) {
+                try {
+                  cleaned = decodeURIComponent(qMatch[1]);
+                } catch {
+                  cleaned = qMatch[1];
+                }
+              }
+            }
+          }
+
+          // Prepend https:// if raw meet.google.com
+          if (/^meet\.google\.com\//i.test(cleaned)) {
+            cleaned = `https://${cleaned}`;
+          }
+
+          // Disqualify generic root or landing links
+          if (
+            /https?:\/\/meet\.google\.com\/?(?:\?.*)?$/i.test(cleaned) ||
+            /https?:\/\/meet\.google\.com\/(?:landing|about|new|terms|help)\b/i.test(cleaned)
+          ) {
+            return null;
+          }
+
+          if (meetRegex.test(cleaned)) {
+            return cleaned;
+          }
+
+          return null;
+        };
+
+        // --- TIER 1: Dedicated Classroom Header Banner Meet Link ---
+        // Look within header / top banner region (banner container or top 450px)
+        const bannerContainers = Array.from(
+          document.querySelectorAll(
+            'header, [role="banner"], [class*="banner" i], [class*="theme" i], [class*="Header" i], [data-course-id]'
+          )
         );
-        for (const a of anchors) {
-          const href = a.href.trim();
-          // Ensure it's visible and not a generic root link
+
+        for (const container of bannerContainers) {
+          // Check anchor tags inside the banner
+          const bannerAnchors = Array.from(container.querySelectorAll<HTMLAnchorElement>('a[href]'));
+          for (const a of bannerAnchors) {
+            const valid = cleanAndValidate(a.href);
+            if (valid) return valid;
+          }
+
+          // Check custom attributes (data-meet-url, data-href, aria-label)
+          const meetElements = Array.from(
+            container.querySelectorAll<HTMLElement>(
+              '[data-meet-url], [data-href*="meet.google.com"], [aria-label*="Meet" i], [aria-label*="Reunión" i], [aria-label*="Lien" i]'
+            )
+          );
+          for (const el of meetElements) {
+            const dataUrl = el.getAttribute('data-meet-url') || el.getAttribute('data-href');
+            if (dataUrl) {
+              const valid = cleanAndValidate(dataUrl);
+              if (valid) return valid;
+            }
+          }
+        }
+
+        // Check any element in top 450px containing meet.google.com
+        const allAnchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+        for (const a of allAnchors) {
           const rect = a.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0 && meetRegex.test(href)) {
-            return href;
+          if (rect.top >= 0 && rect.top <= 450 && rect.width > 0 && rect.height > 0) {
+            const valid = cleanAndValidate(a.href);
+            if (valid) return valid;
           }
         }
 
-        // 2. Fallback: Check any anchor tag in the DOM even if hidden in a collapsed container
-        for (const a of anchors) {
-          if (meetRegex.test(a.href.trim())) {
-            return a.href.trim();
+        // --- TIER 2: Stream Announcement & Feed Posts ---
+        // Posts are sorted chronologically with newest at the top
+        const postContainers = Array.from(
+          document.querySelectorAll(
+            '[data-stream-item-id], [role="article"], [role="region"], div[class*="streamItem" i], div[class*="announcement" i], div[class*="post" i]'
+          )
+        );
+
+        for (const post of postContainers) {
+          // 1. Direct and redirect anchors inside post
+          const postAnchors = Array.from(post.querySelectorAll<HTMLAnchorElement>('a[href]'));
+          for (const a of postAnchors) {
+            const valid = cleanAndValidate(a.href);
+            if (valid) return valid;
+          }
+
+          // 2. Scan text content of post for raw meet URLs
+          const postText = (post as HTMLElement).innerText || post.textContent || '';
+          const textUrlMatch = postText.match(
+            /(?:https?:\/\/)?meet\.google\.com\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]{10,})(?:\?[^\s"'<>]*)?/i
+          );
+          if (textUrlMatch) {
+            const valid = cleanAndValidate(textUrlMatch[0]);
+            if (valid) return valid;
+          }
+
+          // 3. Scan for standalone meet code format e.g. "code: abc-defg-hij" or "meet: abc-defg-hij"
+          const codeMatch = postText.match(/(?:meet|code|link|join)[^a-z0-9]*([a-z]{3}-[a-z]{4}-[a-z]{3})/i);
+          if (codeMatch && codeMatch[1]) {
+            return `https://meet.google.com/${codeMatch[1].toLowerCase()}`;
           }
         }
 
-        // 3. Scan stream post text content for raw Meet URLs pasted without anchor tags
-        const mainRegion = document.querySelector('main') || document.body;
-        const textMatch = mainRegion.innerText.match(meetRegex);
-        if (textMatch && textMatch[0]) {
-          return textMatch[0];
+        // --- TIER 3: Document-wide Fallback ---
+        for (const a of allAnchors) {
+          const valid = cleanAndValidate(a.href);
+          if (valid) return valid;
+        }
+
+        // Document body raw text match
+        const mainEl = document.querySelector('main, [role="main"]') || document.body;
+        const mainText = (mainEl as HTMLElement).innerText || '';
+        const rawMatch = mainText.match(
+          /(?:https?:\/\/)?meet\.google\.com\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]{10,})(?:\?[^\s"'<>]*)?/i
+        );
+        if (rawMatch) {
+          const valid = cleanAndValidate(rawMatch[0]);
+          if (valid) return valid;
         }
 
         return null;
       });
 
       return foundLink;
-    } catch (error) {
+    } catch {
       return null;
     }
   }
 
   /**
-   * Navigates to the Google Meet URL, mutes Microphone, turns off Camera,
-   * and clicks "Join now" or "Ask to join".
+   * Dismisses any permission prompts, "Ready to join?" interstitials, or info popups in Google Meet.
+   */
+  private async dismissMeetPromptsAndInterstitials(
+    page: Page,
+    signal: AbortSignal
+  ): Promise<void> {
+    const dismissSelectors = [
+      // English permission & info dismissals
+      'button:has-text("Continue without microphone and camera")',
+      'button:has-text("Continue without microphone")',
+      'button:has-text("Continue without camera")',
+      'button:has-text("Got it")',
+      'button:has-text("Dismiss")',
+      'button:has-text("Dismiss notification")',
+      'button:has-text("Close")',
+      'button:has-text("No thanks")',
+      'button:has-text("Not now")',
+      // Ready to join interstitial
+      'button:has-text("Ready to join")',
+      'button:has-text("Check in")',
+      // Multilingual variations (Spanish, French, German, Portuguese, Italian, Japanese, Chinese, Arabic)
+      'button:has-text("Continuar sin micrófono y cámara")',
+      'button:has-text("Entendido")',
+      'button:has-text("Descartar")',
+      'button:has-text("Cerrar")',
+      'button:has-text("Continuer sans micro ni caméra")',
+      'button:has-text("J\'ai compris")',
+      'button:has-text("Ignorer")',
+      'button:has-text("Ohne Mikrofon und Kamera fortfahren")',
+      'button:has-text("Verstanden")',
+      'button:has-text("Continuar sem microfone e câmera")',
+      'button:has-text("Entendi")',
+      '[aria-label*="Dismiss" i]',
+      '[aria-label*="Got it" i]',
+      '[aria-label*="Close" i]',
+    ];
+
+    for (let i = 0; i < 4; i++) {
+      if (signal.aborted) return;
+      try {
+        for (const selector of dismissSelectors) {
+          const loc = page.locator(selector).first();
+          if ((await loc.count()) > 0 && (await loc.isVisible())) {
+            await loc.click({ timeout: 1500 }).catch(() => {});
+            await this.sleep(400, signal);
+          }
+        }
+      } catch {
+        // Ignore
+      }
+      await this.sleep(400, signal);
+    }
+  }
+
+  /**
+   * Inspects Google Meet's pre-join media toggle buttons and mutes the device
+   * using resilient multi-tier detection:
+   * 1. Check data-is-muted="false" / data-is-muted="true" attributes
+   * 2. Multilingual aria-labels and button titles (English, Spanish, French, German, Portuguese, etc.)
+   * 3. Native keyboard shortcuts (Ctrl+D / Cmd+D for mic, Ctrl+E / Cmd+E for camera)
+   */
+  private async ensureDeviceMuted(
+    page: Page,
+    device: 'microphone' | 'camera',
+    courseCode: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (signal?.aborted) return;
+
+    try {
+      const isMic = device === 'microphone';
+      const hotkey =
+        process.platform === 'darwin'
+          ? isMic
+            ? 'Meta+d'
+            : 'Meta+e'
+          : isMic
+          ? 'Control+d'
+          : 'Control+e';
+
+      // Evaluate the button's DOM state directly
+      const deviceState = await page.evaluate((isMicrophone: boolean) => {
+        const micUnmutedRegex =
+          /(turn off mic|mute mic|desactivar mic|couper le micro|stumm|desativar mic|disattiva mic|マイクをオフ|关闭麦克风|отключить микрофон|মাইক্রোফোন বন্ধ|माइक्रोफ़ोन बंद)/i;
+        const micMutedRegex =
+          /(turn on mic|unmute mic|activar mic|activer le micro|einschalten|ativar mic|attiva mic|マイクをオン|打开麦克风|включить микрофон|মাইক্রোফোন চালু|माइक्रोफ़ोन चालू)/i;
+
+        const camUnmutedRegex =
+          /(turn off cam|turn off video|desactivar cám|desactivar cam|couper la caméra|kamera deaktivieren|desativar câm|desativar cam|disattiva vid|disattiva cam|カメラをオフ|关闭摄像头|выключить камеру|ক্যামেরা বন্ধ|कैमरा बंद)/i;
+        const camMutedRegex =
+          /(turn on cam|turn on video|activar cám|activar cam|activer la caméra|kamera aktivieren|ativar câm|ativar cam|attiva vid|attiva cam|カメラをオン|打开摄像头|включить камеру|ক্যামেরা চালু|कैमरा चालू)/i;
+
+        const buttons = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"]'));
+
+        for (const btn of buttons) {
+          const aria = (btn.getAttribute('aria-label') || '').trim();
+          const tooltip = (btn.getAttribute('data-tooltip') || '').trim();
+          const mutedAttr = btn.getAttribute('data-is-muted');
+          const combined = `${aria} ${tooltip}`;
+
+          if (isMicrophone) {
+            // Check microphone button
+            const isMicBtn =
+              btn.matches('[aria-label*="mic" i], [data-tooltip*="mic" i], [aria-label*="micro" i]') ||
+              micUnmutedRegex.test(combined) ||
+              micMutedRegex.test(combined) ||
+              combined.includes('ctrl + d') ||
+              combined.includes('⌘ + d');
+
+            if (isMicBtn) {
+              if (mutedAttr === 'true' || micMutedRegex.test(combined)) {
+                return 'ALREADY_MUTED';
+              }
+              if (mutedAttr === 'false' || micUnmutedRegex.test(combined)) {
+                btn.click();
+                return 'CLICKED_MUTE';
+              }
+            }
+          } else {
+            // Check camera button
+            const isCamBtn =
+              btn.matches('[aria-label*="cam" i], [data-tooltip*="cam" i], [aria-label*="camera" i], [aria-label*="vid" i]') ||
+              camUnmutedRegex.test(combined) ||
+              camMutedRegex.test(combined) ||
+              combined.includes('ctrl + e') ||
+              combined.includes('⌘ + e');
+
+            if (isCamBtn) {
+              if (mutedAttr === 'true' || camMutedRegex.test(combined)) {
+                return 'ALREADY_MUTED';
+              }
+              if (mutedAttr === 'false' || camUnmutedRegex.test(combined)) {
+                btn.click();
+                return 'CLICKED_MUTE';
+              }
+            }
+          }
+        }
+
+        return 'NOT_FOUND';
+      }, isMic);
+
+      if (deviceState === 'ALREADY_MUTED') {
+        this.log('info', `${device.charAt(0).toUpperCase() + device.slice(1)} is already OFF.`, courseCode);
+        return;
+      }
+
+      if (deviceState === 'CLICKED_MUTE') {
+        this.log('info', `Clicked button to turn OFF ${device}.`, courseCode);
+        await this.sleep(500, signal);
+        return;
+      }
+
+      // If button selector was ambiguous or not found, trigger resilient keyboard hotkey
+      await page.keyboard.press(hotkey);
+      this.log('info', `Sent ${hotkey} shortcut to ensure ${device} is OFF.`, courseCode);
+      await this.sleep(500, signal);
+    } catch {
+      this.log('warn', `Could not verify ${device} state automatically; check Meet lobby.`, courseCode);
+    }
+  }
+
+  /**
+   * Navigates to the Google Meet URL, handles permission prompts and interstitials,
+   * ensures Microphone and Camera are OFF, and joins or asks to join the meeting.
    */
   private async joinGoogleMeetSession(
     page: Page,
@@ -665,67 +1049,114 @@ export class AutomationEngine {
     await page.goto(meetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
     // Wait for Meet pre-join screen controls to initialize
-    await this.sleep(5000, signal);
+    await this.sleep(4500, signal);
     if (signal.aborted) return;
 
-    // Dismiss any "Continue without microphone and camera" or modal popups if present
-    try {
-      const dismissBtn = page.locator(
-        'button:has-text("Continue without"), button:has-text("Got it"), button:has-text("Dismiss")'
-      );
-      if ((await dismissBtn.count()) > 0) {
-        await dismissBtn.first().click({ timeout: 2000 }).catch(() => {});
-      }
-    } catch {
-      // Ignore if no popup exists
-    }
+    // Dismiss permission popups and "Ready to join?" interstitials
+    await this.dismissMeetPromptsAndInterstitials(page, signal);
 
-    // 1. Mute Microphone if unmuted
+    // 1. Mute Microphone if enabled in settings
     if (settings.alwaysMuteMic) {
-      await this.ensureDeviceMuted(page, 'microphone', cls.courseCode);
+      await this.ensureDeviceMuted(page, 'microphone', cls.courseCode, signal);
     }
 
-    // 2. Turn Off Camera if active
+    // 2. Turn Off Camera if enabled in settings
     if (settings.alwaysTurnOffCam) {
-      await this.ensureDeviceMuted(page, 'camera', cls.courseCode);
+      await this.ensureDeviceMuted(page, 'camera', cls.courseCode, signal);
     }
 
     await this.sleep(1000, signal);
     if (signal.aborted) return;
 
-    // 3. Click "Join now" or "Ask to join"
-    this.log('info', 'Looking for "Join now" / "Ask to join" button...', cls.courseCode);
-
-    const joinSelectors = [
-      'button:has-text("Join now")',
-      'button:has-text("Ask to join")',
-      'button:has-text("Join anyway")',
-      'button:has-text("Switch here")',
-      '[ role="button" ]:has-text("Join now")',
-      '[ role="button" ]:has-text("Ask to join")',
-    ];
+    // 3. Resilient Join Detection & Click
+    this.log('info', 'Searching for "Join now" / "Ask to join" button...', cls.courseCode);
 
     let joined = false;
-    for (const selector of joinSelectors) {
-      const locator = page.locator(selector).first();
-      if ((await locator.count()) > 0 && (await locator.isVisible())) {
-        await locator.click({ timeout: 5000 });
+    let askedToJoin = false;
+
+    // Polling loop up to 18 seconds for lobby controls to settle
+    const startTime = Date.now();
+    while (Date.now() - startTime < 18000) {
+      if (signal.aborted) return;
+
+      // Check if already connected inside the meeting room
+      const inCall = await page.evaluate(() => {
+        const leaveBtn = document.querySelector(
+          '[aria-label*="Leave call" i], [aria-label*="leave" i], button[data-call-ended]'
+        );
+        return !!leaveBtn;
+      });
+
+      if (inCall) {
         joined = true;
         break;
       }
+
+      // Check if user has already clicked "Ask to join" and is in the waiting room
+      const isWaitingAdmission = await page.evaluate(() => {
+        const bodyText = document.body.innerText || '';
+        const waitingRegex =
+          /(asking to join|waiting for host|someone will let you in|solicitando unirse|demande envoyée|anfrage gesendet|solicitação enviada)/i;
+        return waitingRegex.test(bodyText);
+      });
+
+      if (isWaitingAdmission) {
+        askedToJoin = true;
+        break;
+      }
+
+      // Check for Join button across multiple languages and aria-labels
+      const clicked = await page.evaluate(() => {
+        const joinRegex =
+          /^(join now|ask to join|join anyway|rejoin|switch here|unirse ahora|solicitar unirse|unirme ahora|participer à la réunion|demander à participer|rejoindre maintenant|jetzt teilnehmen|teilnahme anfragen|participar agora|pedir para participar|partecipa|chiedi di partecipare|присоединиться|попросить о присоединении|এখনই যোগ দিন|যোগদানের অনুরোধ জানান|अभी शामिल हों|立即加入|申请加入|今すぐ参加|参加をリクエスト|الانضمام الآن|طلب الانضمام)$/i;
+
+        const partialJoinRegex =
+          /(join now|ask to join|join anyway|unirse ahora|solicitar unirse|participer à la réunion|jetzt teilnehmen|participar agora|partecipa|присоединиться|এখনই যোগ দিন|अभी शामिल हों|立即加入|今すぐ参加)/i;
+
+        const buttons = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"]'));
+
+        for (const btn of buttons) {
+          const text = (btn.innerText || btn.textContent || '').trim();
+          const aria = (btn.getAttribute('aria-label') || '').trim();
+
+          // Exclude "Present" / "Share screen" buttons
+          if (/present|compartir pantalla|partager l'écran|bildschirm/i.test(text) || /present/i.test(aria)) {
+            continue;
+          }
+
+          if (joinRegex.test(text) || joinRegex.test(aria) || partialJoinRegex.test(text)) {
+            const rect = btn.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              btn.click();
+              return true;
+            }
+          }
+        }
+        return false;
+      });
+
+      if (clicked) {
+        joined = true;
+        await this.sleep(2000, signal);
+        break;
+      }
+
+      await this.sleep(1200, signal);
     }
 
-    if (joined) {
-      this.log(
-        'success',
-        `Successfully clicked Join for ${cls.courseCode} (${cls.courseName}) with Mic & Camera muted!`,
-        cls.courseCode
-      );
+    if (joined || askedToJoin) {
+      const msg = askedToJoin
+        ? `Sent join request for ${cls.courseCode} (${cls.courseName}) — waiting for instructor admittance.`
+        : `Successfully joined ${cls.courseCode} (${cls.courseName}) with Mic & Camera muted!`;
+
+      this.log('success', msg, cls.courseCode);
       this.setStatus({
         state: 'IN_CLASS',
         activeClassId: cls.id,
         activeClassName: `${cls.courseCode} - ${cls.courseName}`,
-        message: `Connected to ${cls.courseCode} Google Meet (Mic & Cam OFF)`,
+        message: askedToJoin
+          ? `Waiting for host to admit to ${cls.courseCode} (Mic & Cam OFF)`
+          : `Connected to ${cls.courseCode} Google Meet (Mic & Cam OFF)`,
       });
     } else {
       this.log(
@@ -743,57 +1174,6 @@ export class AutomationEngine {
   }
 
   /**
-   * Inspects Google Meet's pre-join media toggle buttons and mutes the device
-   * only if it is currently active/unmuted.
-   */
-  private async ensureDeviceMuted(
-    page: Page,
-    device: 'microphone' | 'camera',
-    courseCode: string
-  ): Promise<void> {
-    try {
-      // Check if button with "Turn off microphone" / "Turn off camera" or data-is-muted="false" exists
-      const unmutedSelector =
-        device === 'microphone'
-          ? '[aria-label*="Turn off microphone" i], [data-is-muted="false"][aria-label*="microphone" i]'
-          : '[aria-label*="Turn off camera" i], [data-is-muted="false"][aria-label*="camera" i]';
-
-      const alreadyMutedSelector =
-        device === 'microphone'
-          ? '[aria-label*="Turn on microphone" i], [data-is-muted="true"][aria-label*="microphone" i]'
-          : '[aria-label*="Turn on camera" i], [data-is-muted="true"][aria-label*="camera" i]';
-
-      const unmutedBtn = page.locator(unmutedSelector).first();
-      if ((await unmutedBtn.count()) > 0 && (await unmutedBtn.isVisible())) {
-        await unmutedBtn.click({ timeout: 3000 });
-        this.log('info', `Automatically turned OFF ${device}.`, courseCode);
-        return;
-      }
-
-      const mutedBtn = page.locator(alreadyMutedSelector).first();
-      if ((await mutedBtn.count()) > 0) {
-        this.log('info', `${device.charAt(0).toUpperCase() + device.slice(1)} is already OFF.`, courseCode);
-        return;
-      }
-
-      // Keyboard shortcut fallback if standard button selectors haven't settled
-      const shortcut =
-        device === 'microphone'
-          ? process.platform === 'darwin'
-            ? 'Meta+d'
-            : 'Control+d'
-          : process.platform === 'darwin'
-          ? 'Meta+e'
-          : 'Control+e';
-
-      await page.keyboard.press(shortcut);
-      this.log('info', `Sent ${shortcut} toggle to ensure ${device} is muted.`, courseCode);
-    } catch (err) {
-      this.log('warn', `Could not verify ${device} state automatically; check Meet lobby.`, courseCode);
-    }
-  }
-
-  /**
    * Automatically leaves the active Google Meet session when class endTime is reached
    * if autoLeaveAtEnd is enabled for the class.
    */
@@ -801,14 +1181,32 @@ export class AutomationEngine {
     if (!this.activePage) return;
     try {
       this.log('info', `Class end time reached for ${cls.courseCode}. Leaving Meet call...`, cls.courseCode);
-      const leaveBtn = this.activePage
-        .locator('[aria-label*="Leave call" i], button:has-text("Leave call")')
-        .first();
-      if ((await leaveBtn.count()) > 0 && (await leaveBtn.isVisible())) {
-        await leaveBtn.click({ timeout: 3000 });
-      } else {
-        await this.activePage.goto('about:blank');
+
+      const leaveSelectors = [
+        '[aria-label*="Leave call" i]',
+        '[aria-label*="Leave" i]',
+        'button:has-text("Leave call")',
+        'button:has-text("Salir de la llamada")',
+        'button:has-text("Quitter l\'appel")',
+        'button:has-text("Anruf verlassen")',
+        'button:has-text("Sair da chamada")',
+        '[data-tooltip*="leave" i]',
+      ];
+
+      let clicked = false;
+      for (const sel of leaveSelectors) {
+        const btn = this.activePage.locator(sel).first();
+        if ((await btn.count()) > 0 && (await btn.isVisible())) {
+          await btn.click({ timeout: 2500 }).catch(() => {});
+          clicked = true;
+          break;
+        }
       }
+
+      if (!clicked) {
+        await this.activePage.goto('about:blank').catch(() => {});
+      }
+
       this.log('success', `Left ${cls.courseCode} at scheduled end time.`, cls.courseCode);
       this.setStatus({
         state: 'IDLE',
@@ -819,8 +1217,7 @@ export class AutomationEngine {
         maxAttempts: undefined,
         nextRetryInSeconds: undefined,
       });
-    } catch (error) {
-      // Ignore if page was already closed manually
+    } catch {
       this.setStatus({
         state: 'IDLE',
         activeClassId: null,
@@ -834,43 +1231,45 @@ export class AutomationEngine {
   }
 
   /**
-   * Scrapes enrolled courses from the Google Classroom homepage.
-   * Opens Classroom in the persistent browser and extracts course cards.
+   * Resilient Multi-Tier Scraper for Enrolled Google Classroom Courses:
+   * Google Classroom frequently rotates and obfuscates CSS class names.
+   * This implementation deploys resilient multi-tier fallback scrapers:
+   * 1. Card Container DOM Walking: Traverses card containers (`ol > li`, `[role="listitem"]`, `[data-course-id]`, `article`).
+   * 2. Semantic Selectors: Extracts headings (`[role="heading"]`, `h2`, `h3`, `div[aria-level]`), course links (`a[href*="/c/"]`, `a[href*="/r/"]`).
+   * 3. Aria-label Parsing: Strips boilerplate prefixes ("Open class:", "Options for", "Class:") and splits title/section.
+   * 4. Robust Regex Extraction: Extracts course codes (e.g. "CSE 203T", "BDS 109", "PHY 101L") and sections (e.g. "Sec 10").
    */
   public async scrapeClassroomCourses(): Promise<ImportedCourse[]> {
     this.log('info', 'Connecting to Google Classroom to retrieve enrolled courses...');
 
     try {
       const context = await this.ensurePersistentContext();
-      let page = this.findExistingPage(context, 'classroom.google.com');
+      const page = await this.getOrCreateUsablePage(context, 'classroom.google.com');
 
-      if (page) {
-        this.activePage = page;
-        await page.bringToFront();
-        this.log('info', 'Found already opened Google Classroom window. Reusing without opening a new window.');
-      } else {
-        const pages = context.pages().filter((p) => !p.isClosed());
-        page = pages.length > 0 ? pages[0] : await context.newPage();
-        this.activePage = page;
-        await page.bringToFront();
-      }
-
-      // Ensure page is on the home classes dashboard (/u/0/h) so all enrolled course cards are loaded
+      // Preserve existing user account profile (/u/1/, /u/2/, etc.) if already selected
       const currentUrl = page.url();
-      const isDashboard = /\/h(\/classes)?(\?.*)?$/i.test(currentUrl) || /classroom\.google\.com\/?(\?.*)?$/i.test(currentUrl);
+      const accountMatch = currentUrl.match(/\/u\/(\d+)\//);
+      const accountPath = accountMatch ? `/u/${accountMatch[1]}/h` : '/u/0/h';
+
+      const isDashboard =
+        /\/h(\/classes)?(\?.*)?$/i.test(currentUrl) ||
+        /classroom\.google\.com\/?(\?.*)?$/i.test(currentUrl);
+
       if (!isDashboard) {
-        this.log('info', 'Navigating to Google Classroom classes dashboard (https://classroom.google.com/u/0/h)...');
-        await page.goto('https://classroom.google.com/u/0/h', {
+        this.log('info', `Navigating to Google Classroom classes dashboard (https://classroom.google.com${accountPath})...`);
+        await page.goto(`https://classroom.google.com${accountPath}`, {
           waitUntil: 'domcontentloaded',
           timeout: 60000,
         });
       }
 
-      // Wait for Classroom SPA to fully render course cards
+      // Wait for Classroom SPA hydration
       await this.sleep(4500);
 
       try {
-        await page.waitForSelector('a[href*="/c/"]', { timeout: 10000 });
+        await page.waitForSelector('a[href*="/c/"], [data-course-id], [role="listitem"]', {
+          timeout: 10000,
+        });
       } catch {
         this.log('warn', 'Waiting for course card elements to settle...');
       }
@@ -886,57 +1285,196 @@ export class AutomationEngine {
 
         const seen = new Set<string>();
 
-        // Find all anchor tags pointing to courses, ignoring assignments / student work / classwork / drive
-        const allLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/c/"], a[href*="/r/"]'))
-          .filter((a) => {
-            const h = a.href;
-            return (
-              !h.includes('/a/') &&
-              !h.includes('/sp/') &&
-              !h.includes('/w/') &&
-              !h.includes('/gb/') &&
-              !h.includes('/d/')
-            );
-          });
+        // Regex helpers
+        const extractCode = (text: string): string | undefined => {
+          if (!text) return undefined;
+          // Strip semester/term prefixes like "Autumn-2026-", "Spring 2025 ", "Fall_2026"
+          const cleaned = text.replace(
+            /\b(autumn|spring|summer|fall|winter|semester|term)[-_ ]*(20\d\d)\b/gi,
+            ''
+          );
 
-        for (const a of allLinks) {
-          const match = a.href.match(/\/(?:c|r)\/([a-zA-Z0-9_-]+)/);
-          if (!match) continue;
+          // Matches: "CSE 203T", "CSE203T", "BDS-109", "PHY 101L", "MAT120", "CS 101", "COMP.SCI 101"
+          const codeRegex = /\b([A-Z]{2,6})\s*[-_.]?\s*([0-9]{3,4}[A-Z]?)\b/gi;
+          let match: RegExpExecArray | null;
+          while ((match = codeRegex.exec(cleaned)) !== null) {
+            const dept = match[1].toUpperCase();
+            const num = match[2].toUpperCase();
+            // Avoid matching semester names or non-course keywords
+            if (!/^(AUTUMN|SPRING|SUMMER|FALL|WINTER|CLASS|TERM|ROOM)$/i.test(dept)) {
+              return `${dept} ${num}`;
+            }
+          }
+          return undefined;
+        };
+
+        const extractSection = (title: string, subtitle?: string): string | undefined => {
+          const combined = `${subtitle || ''} ${title}`.trim();
+
+          // 1. Explicit Section keyword: "Sec 10", "Section 2", "Sec. 03", "Period 4"
+          const secRegex =
+            /\b(?:sec(?:tion)?\.?\s*[-_#:]?\s*([0-9]{1,3}[A-Z]?)|period\s*[-_#:]?\s*([0-9]{1,3}[A-Z]?))\b/i;
+          const m = combined.match(secRegex);
+          if (m) {
+            const num = m[1] || m[2];
+            return `Sec ${num}`;
+          }
+
+          // 2. Trailing section number e.g. "Autumn-2026-CSE203T-10" or "CSE203-02"
+          const trailingRegex = /[-_/\s]([0-9]{1,3}[A-Z]?)$/i;
+          const tm = title.match(trailingRegex);
+          if (tm && parseInt(tm[1], 10) > 0 && parseInt(tm[1], 10) < 500) {
+            return `Sec ${tm[1]}`;
+          }
+
+          return undefined;
+        };
+
+        const cleanTitle = (raw: string): string => {
+          return raw
+            .replace(/^open (your work for|options for|folder for|class:?)\s*/i, '')
+            .replace(/^options for\s*/i, '')
+            .replace(/^class:?\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        };
+
+        const isValidCourseId = (id: string): boolean => {
+          return (
+            !!id &&
+            id.length >= 3 &&
+            !/^(u|h|a|w|sp|gb|d|calendar|archive|archived|settings|to-do|to-review|classes)$/i.test(id)
+          );
+        };
+
+        // --- TIER 1: Card Container DOM Walking ---
+        // Find top-level card containers
+        const cardContainers = Array.from(
+          document.querySelectorAll(
+            'ol > li, [role="listitem"], [data-course-id], article, div.gHz6xd, div[class*="CourseCard" i], div[class*="course-card" i]'
+          )
+        );
+
+        for (const card of cardContainers) {
+          // Find anchor tag for this course
+          const courseLink = card.querySelector<HTMLAnchorElement>(
+            'a[href*="/c/"], a[href*="/r/"]'
+          );
+          if (!courseLink) continue;
+
+          const href = courseLink.href;
+          // Filter out internal assignment or folder links
+          if (
+            href.includes('/a/') ||
+            href.includes('/sp/') ||
+            href.includes('/w/') ||
+            href.includes('/gb/') ||
+            href.includes('/d/') ||
+            href.includes('/calendar')
+          ) {
+            continue;
+          }
+
+          const match = href.match(/\/(?:c|r)\/([a-zA-Z0-9_-]+)/);
+          if (!match || !isValidCourseId(match[1])) continue;
           const courseId = match[1];
+
           if (seen.has(courseId)) continue;
-          seen.add(courseId);
 
-          // Strategy A: Direct title element inside the anchor tag
-          // Google Classroom puts the primary course title in .GRvzhf, .ScpeUc, or heading
-          const titleEl =
-            a.querySelector('.GRvzhf, .ScpeUc, [class*="GRvzhf"], [class*="ScpeUc"]') ||
-            a.querySelector('h2, h3, [role="heading"]');
-          let title = titleEl ? (titleEl.textContent || '').trim() : '';
+          // Discover heading in card
+          const headingEl =
+            card.querySelector('[role="heading"], h2, h3, h1, [class*="GRvzhf"], [class*="ScpeUc"]') ||
+            courseLink.querySelector('[role="heading"], h2, h3, h1');
 
-          // Subtitle / section element in Google Classroom: .DWJNgb, .FWGURc
-          const subtitleEl =
-            a.querySelector('.DWJNgb, .FWGURc, [class*="DWJNgb"], [class*="FWGURc"]');
+          let title = headingEl ? cleanTitle(headingEl.textContent || '') : '';
+
+          // Discover subtitle / section element in card
+          const subtitleEl = card.querySelector(
+            '[class*="DWJNgb"], [class*="FWGURc"], [class*="subtitle" i], [class*="section" i]'
+          );
           let subtitle = subtitleEl ? (subtitleEl.textContent || '').trim() : '';
 
-          const ariaLabel = (a.getAttribute('aria-label') || '').trim();
-
-          // Strategy B: If title not found via specific classes, parse aria-label
-          if (!title && ariaLabel) {
-            const cleanAria = ariaLabel
-              .replace(/^open (your work for|options for|folder for|class:?)\s*/i, '')
-              .replace(/^options for\s*/i, '')
-              .trim();
-            const parts = cleanAria.split(',').map((s) => s.trim()).filter(Boolean);
-            title = parts[0] || cleanAria;
-            if (parts.length > 1 && !subtitle) {
-              subtitle = parts[1];
+          // Aria-label fallback
+          const ariaLabel = cleanTitle(courseLink.getAttribute('aria-label') || '');
+          if (!title || title.toLowerCase() === 'home') {
+            if (ariaLabel) {
+              const parts = ariaLabel.split(',').map((s) => s.trim()).filter(Boolean);
+              title = parts[0] || ariaLabel;
+              if (parts.length > 1 && !subtitle) {
+                subtitle = parts[1];
+              }
             }
           }
 
-          // Strategy C: Inspect text-bearing leaf nodes inside the link, filtering single-char avatars & icons
+          if (title && title.toLowerCase() !== 'home') {
+            seen.add(courseId);
+            const courseCode = extractCode(`${title} ${subtitle}`);
+            const section = extractSection(title, subtitle);
+
+            results.push({
+              id: courseId,
+              name: title,
+              section,
+              url: href.includes('classroom.google.com')
+                ? href
+                : `https://classroom.google.com/c/${courseId}`,
+              courseCode,
+            });
+          }
+        }
+
+        // --- TIER 2: Semantic Anchor Discovery Fallback ---
+        const allCourseLinks = Array.from(
+          document.querySelectorAll<HTMLAnchorElement>('a[href*="/c/"], a[href*="/r/"]')
+        ).filter((a) => {
+          const h = a.href;
+          return (
+            !h.includes('/a/') &&
+            !h.includes('/sp/') &&
+            !h.includes('/w/') &&
+            !h.includes('/gb/') &&
+            !h.includes('/d/') &&
+            !h.includes('/calendar') &&
+            !h.includes('/settings')
+          );
+        });
+
+        for (const a of allCourseLinks) {
+          const match = a.href.match(/\/(?:c|r)\/([a-zA-Z0-9_-]+)/);
+          if (!match || !isValidCourseId(match[1])) continue;
+          const courseId = match[1];
+
+          if (seen.has(courseId)) continue;
+
+          // Check heading inside anchor or walk up to closest container
+          const headingEl =
+            a.querySelector('[role="heading"], h2, h3, [class*="GRvzhf"], [class*="ScpeUc"]') ||
+            a.closest('li, [role="listitem"], [data-course-id], article, div')?.querySelector(
+              '[role="heading"], h2, h3'
+            );
+
+          let title = headingEl ? cleanTitle(headingEl.textContent || '') : '';
+          const ariaLabel = cleanTitle(a.getAttribute('aria-label') || '');
+
+          let subtitle = '';
+          if (!title || title.toLowerCase() === 'home') {
+            if (ariaLabel) {
+              const parts = ariaLabel.split(',').map((s) => s.trim()).filter(Boolean);
+              title = parts[0] || ariaLabel;
+              if (parts.length > 1) {
+                subtitle = parts[1];
+              }
+            }
+          }
+
+          // Inspect text-bearing leaf nodes
           if (!title || title.toLowerCase() === 'home') {
             const textNodes = Array.from(a.querySelectorAll('*'))
-              .map((el) => (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 ? (el.textContent || '').trim() : ''))
+              .map((el) =>
+                el.childNodes.length === 1 && el.childNodes[0].nodeType === 3
+                  ? (el.textContent || '').trim()
+                  : ''
+              )
               .filter(
                 (t) =>
                   t.length > 2 &&
@@ -944,43 +1482,20 @@ export class AutomationEngine {
                   t !== 'more_vert' &&
                   t.toLowerCase() !== 'home'
               );
+
             if (textNodes.length > 0) {
               title = textNodes[0];
-              if (textNodes.length > 1 && !subtitle) {
-                subtitle = textNodes[1];
-              }
+              if (textNodes.length > 1) subtitle = textNodes[1];
             }
           }
 
-          // Final fallback: use a cleaned-up non-empty title or Course ID
           if (!title || title.toLowerCase() === 'home') {
             title = ariaLabel || `Course ${courseId}`;
           }
 
-          // Parse courseCode: e.g. "CSE 203T", "BDS 109", "PHY 101L", "CSE 201"
-          let courseCode: string | undefined;
-          const codeRegex = /\b([A-Z]{2,5})\s*[-_]?\s*([0-9]{3}[A-Z]?)\b/i;
-          const codeMatch = (title + ' ' + subtitle).match(codeRegex);
-          if (codeMatch) {
-            courseCode = `${codeMatch[1].toUpperCase()} ${codeMatch[2].toUpperCase()}`;
-          }
-
-          // Parse section: e.g. from "Autumn-2026-CSE203T-10" the section is "10"
-          let section: string | undefined;
-          const secRegex = /[-_]([0-9]{1,3}[A-Z]?)$/i;
-          const secMatch = title.match(secRegex);
-          if (secMatch) {
-            section = `Sec ${secMatch[1]}`;
-          } else if (subtitle) {
-            const subSecMatch = subtitle.match(
-              /\b(sec(?:tion)?\.?\s*[-_#]?\s*\d+[A-Z]?|period\s*\d+|\d{1,3}[A-Z]?)\b/i
-            );
-            if (subSecMatch) {
-              section = subSecMatch[1].startsWith('Sec')
-                ? subSecMatch[1]
-                : `Sec ${subSecMatch[1]}`;
-            }
-          }
+          seen.add(courseId);
+          const courseCode = extractCode(`${title} ${subtitle}`);
+          const section = extractSection(title, subtitle);
 
           results.push({
             id: courseId,
@@ -1031,10 +1546,11 @@ export class AutomationEngine {
       if (!cls.enabled) continue;
       if (cls.isScheduleConfigured === false) continue;
       if (cls.needsSchedule) continue;
-      if (!cls.days || cls.days.length === 0) continue;
-      if (!cls.startTime) continue;
+      if (!cls.days || !Array.isArray(cls.days) || cls.days.length === 0) continue;
+      if (!cls.startTime || typeof cls.startTime !== 'string') continue;
 
       const [startH, startM] = cls.startTime.split(':').map(Number);
+      if (isNaN(startH) || isNaN(startM)) continue;
       const startTotalMin = startH * 60 + startM;
 
       // Check each day of the week for the next occurrence
@@ -1051,7 +1567,7 @@ export class AutomationEngine {
           if (minutesUntil <= 0) continue; // Already passed today
         } else {
           // Future day
-          minutesUntil = (dayOffset * 24 * 60) + startTotalMin - currentTotalMin;
+          minutesUntil = dayOffset * 24 * 60 + startTotalMin - currentTotalMin;
         }
 
         if (minutesUntil < bestMinutes) {

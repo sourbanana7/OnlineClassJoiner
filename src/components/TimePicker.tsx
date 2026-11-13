@@ -119,6 +119,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               className="tp-combo-btn"
               onClick={() => applyDayCombo(['Sun', 'Tue'])}
               title="Sunday & Tuesday"
+              aria-label="Set days to Sunday and Tuesday"
             >
               ST (Sun/Tue)
             </button>
@@ -127,6 +128,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               className="tp-combo-btn"
               onClick={() => applyDayCombo(['Mon', 'Wed'])}
               title="Monday & Wednesday"
+              aria-label="Set days to Monday and Wednesday"
             >
               MW (Mon/Wed)
             </button>
@@ -135,6 +137,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               className="tp-combo-btn"
               onClick={() => applyDayCombo(['Thu', 'Sat'])}
               title="Thursday & Saturday"
+              aria-label="Set days to Thursday and Saturday"
             >
               RA (Thu/Sat)
             </button>
@@ -150,6 +153,8 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                 type="button"
                 className={`tp-day-pill ${isSelected ? 'selected' : ''}`}
                 onClick={() => handleToggleDay(day.key)}
+                aria-pressed={isSelected}
+                aria-label={`Toggle ${day.full}`}
               >
                 <span className="tp-day-short">{day.full}</span>
               </button>
@@ -177,6 +182,8 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                   onChangeStartTime(slot.start);
                   onChangeEndTime(slot.end);
                 }}
+                aria-pressed={isMatch}
+                aria-label={`Select ${slot.label}`}
               >
                 {slot.label}
               </button>
@@ -197,6 +204,8 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                 setActiveField('start');
                 setDialMode('hour');
               }}
+              aria-pressed={activeField === 'start'}
+              aria-label={`Set Start Time. Current: ${format12HourReadable(startTime)}`}
             >
               <span className="tp-tab-label">START TIME (SCAN AT)</span>
               <span className="tp-tab-value">{format12HourReadable(startTime)}</span>
@@ -209,6 +218,8 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                 setActiveField('end');
                 setDialMode('hour');
               }}
+              aria-pressed={activeField === 'end'}
+              aria-label={`Set End Time. Current: ${format12HourReadable(endTime)}`}
             >
               <span className="tp-tab-label">END TIME</span>
               <span className="tp-tab-value">{format12HourReadable(endTime)}</span>
@@ -222,14 +233,16 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                 type="button"
                 className={`tp-digit-btn ${dialMode === 'hour' ? 'focused' : ''}`}
                 onClick={() => setDialMode('hour')}
+                aria-label={`Hour: ${displayHour12}. Click to select hours on dial.`}
               >
                 {String(displayHour12).padStart(2, '0')}
               </button>
-              <span className="tp-colon">:</span>
+              <span className="tp-colon" aria-hidden="true">:</span>
               <button
                 type="button"
                 className={`tp-digit-btn ${dialMode === 'minute' ? 'focused' : ''}`}
                 onClick={() => setDialMode('minute')}
+                aria-label={`Minute: ${rawMinute}. Click to select minutes on dial.`}
               >
                 {String(rawMinute).padStart(2, '0')}
               </button>
@@ -239,6 +252,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                   type="button"
                   onClick={() => stepMinute(1)}
                   title="+1 Minute"
+                  aria-label="Add 1 minute"
                   className="tp-step-icon-btn"
                 >
                   <ChevronUp size={14} />
@@ -247,6 +261,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                   type="button"
                   onClick={() => stepMinute(-1)}
                   title="-1 Minute"
+                  aria-label="Subtract 1 minute"
                   className="tp-step-icon-btn"
                 >
                   <ChevronDown size={14} />
@@ -259,6 +274,8 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                 type="button"
                 className={`tp-ampm-btn ${period === 'AM' ? 'active' : ''}`}
                 onClick={() => updateTimeFrom12Hour(displayHour12, rawMinute, 'AM')}
+                aria-pressed={period === 'AM'}
+                aria-label="Set AM"
               >
                 AM
               </button>
@@ -266,6 +283,8 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                 type="button"
                 className={`tp-ampm-btn ${period === 'PM' ? 'active' : ''}`}
                 onClick={() => updateTimeFrom12Hour(displayHour12, rawMinute, 'PM')}
+                aria-pressed={period === 'PM'}
+                aria-label="Set PM"
               >
                 PM
               </button>
@@ -276,10 +295,18 @@ export const TimePicker: React.FC<TimePickerProps> = ({
           <div className="tp-duration-helpers">
             <span className="tp-helper-caption">Set End Time from Start:</span>
             <div className="tp-duration-btns">
-              <button type="button" onClick={() => applyDurationFromStart(90)}>
+              <button
+                type="button"
+                onClick={() => applyDurationFromStart(90)}
+                aria-label="Add 1 hour and 30 minutes to start time for end time"
+              >
                 +1h 30m (Theory)
               </button>
-              <button type="button" onClick={() => applyDurationFromStart(150)}>
+              <button
+                type="button"
+                onClick={() => applyDurationFromStart(150)}
+                aria-label="Add 2 hours and 30 minutes to start time for end time"
+              >
                 +2h 30m (Lab)
               </button>
             </div>
@@ -293,6 +320,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               type="button"
               className={dialMode === 'hour' ? 'active' : ''}
               onClick={() => setDialMode('hour')}
+              aria-pressed={dialMode === 'hour'}
             >
               <Clock size={13} /> Select Hour
             </button>
@@ -300,20 +328,26 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               type="button"
               className={dialMode === 'minute' ? 'active' : ''}
               onClick={() => setDialMode('minute')}
+              aria-pressed={dialMode === 'minute'}
             >
               Select Minute
             </button>
           </div>
 
-          <svg className="tp-clock-svg" width="230" height="230" viewBox="0 0 230 230">
+          <svg
+            className="tp-clock-svg"
+            width="230"
+            height="230"
+            viewBox="0 0 230 230"
+            role="img"
+            aria-label={`Interactive clock dial. Currently selecting ${dialMode}.`}
+          >
             {/* Outer Dial Face */}
             <circle
               cx={center}
               cy={center}
               r={clockRadius + 14}
-              fill="#001938"
-              stroke="#1E3A5F"
-              strokeWidth="2"
+              className="tp-clock-face"
             />
 
             {/* Clock Hand Line */}
@@ -322,13 +356,11 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               y1={center}
               x2={handX}
               y2={handY}
-              stroke="#FFB81C"
-              strokeWidth="3"
-              strokeLinecap="round"
+              className="tp-clock-hand"
             />
 
             {/* Center Pin */}
-            <circle cx={center} cy={center} r="5" fill="#FFB81C" />
+            <circle cx={center} cy={center} r="5" className="tp-clock-center-pin" />
 
             {/* Interactive Clock Numbers */}
             {dialNumbers.map((num, idx) => {
@@ -345,7 +377,21 @@ export const TimePicker: React.FC<TimePickerProps> = ({
               return (
                 <g
                   key={num}
-                  className="tp-clock-number-group"
+                  className={`tp-clock-number-group ${isSelected ? 'selected' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Select ${dialMode === 'hour' ? `${num} hours` : `${num} minutes`}`}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      if (dialMode === 'hour') {
+                        updateTimeFrom12Hour(num, rawMinute, period);
+                        setDialMode('minute');
+                      } else {
+                        updateTimeFrom12Hour(displayHour12, num, period);
+                      }
+                    }
+                  }}
                   onClick={() => {
                     if (dialMode === 'hour') {
                       updateTimeFrom12Hour(num, rawMinute, period);
@@ -359,17 +405,14 @@ export const TimePicker: React.FC<TimePickerProps> = ({
                     cx={x}
                     cy={y}
                     r="16"
-                    fill={isSelected ? '#FFB81C' : 'transparent'}
-                    className="tp-clock-num-circle"
+                    className={`tp-clock-num-circle ${isSelected ? 'selected' : ''}`}
                   />
                   <text
                     x={x}
                     y={y}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill={isSelected ? '#002147' : '#F8FAFC'}
-                    fontWeight={isSelected ? '700' : '500'}
-                    fontSize="12"
+                    className={`tp-clock-num-text ${isSelected ? 'selected' : ''}`}
                   >
                     {dialMode === 'minute' ? String(num).padStart(2, '0') : num}
                   </text>

@@ -1,6 +1,3 @@
-// Written and refined by Gemini - Continuing from previous agent's milestone
-// Live automation console sidebar component displaying status indicators, controls, and event stream
-
 import React from 'react';
 import {
   Terminal,
@@ -39,30 +36,36 @@ export const LiveConsole: React.FC<LiveConsoleProps> = ({
   const getLogIcon = (level: LogEntry['level']) => {
     switch (level) {
       case 'success':
-        return <CheckCircle2 size={14} className="log-icon success" />;
+        return <CheckCircle2 size={14} className="log-icon success" aria-hidden="true" />;
       case 'warn':
-        return <AlertTriangle size={14} className="log-icon warn" />;
+        return <AlertTriangle size={14} className="log-icon warn" aria-hidden="true" />;
       case 'error':
-        return <XCircle size={14} className="log-icon error" />;
+        return <XCircle size={14} className="log-icon error" aria-hidden="true" />;
       default:
-        return <Info size={14} className="log-icon info" />;
+        return <Info size={14} className="log-icon info" aria-hidden="true" />;
     }
   };
 
   return (
-    <aside className="live-console-panel">
+    <aside className="live-console-panel" aria-label="Live Automation Terminal">
       {/* Real-time Status Monitor Banner */}
       <div className={`status-monitor-card state-${status.state.toLowerCase()}`}>
         <div className="status-monitor-header">
           <div className="status-indicator-group">
-            <span className={`pulse-dot ${status.state.toLowerCase()}`} />
+            <span className={`pulse-dot ${status.state.toLowerCase()}`} aria-hidden="true" />
             <span className="status-state-badge">{status.state.replace(/_/g, ' ')}</span>
           </div>
 
           <div className="status-monitor-actions">
             {isBusy && (
-              <button type="button" className="btn-stop-scan" onClick={onCancelTask}>
-                <StopCircle size={14} /> Stop Scan
+              <button
+                type="button"
+                className="btn-stop-scan"
+                onClick={onCancelTask}
+                aria-label="Stop current automated task"
+              >
+                <StopCircle size={14} aria-hidden="true" />
+                <span>Stop</span>
               </button>
             )}
             {onHide && (
@@ -71,27 +74,30 @@ export const LiveConsole: React.FC<LiveConsoleProps> = ({
                 className="btn-hide-console-top"
                 onClick={onHide}
                 title="Hide Live Terminal"
+                aria-label="Hide Live Terminal"
               >
-                <PanelRightClose size={15} />
+                <PanelRightClose size={15} aria-hidden="true" />
               </button>
             )}
           </div>
         </div>
 
         {status.activeClassName && (
-          <div className="status-active-course">{status.activeClassName}</div>
+          <div className="status-active-course" title={status.activeClassName}>
+            {status.activeClassName}
+          </div>
         )}
 
         <p className="status-live-message">{status.message}</p>
 
         {status.attempt && status.maxAttempts && (
-          <div className="status-progress-wrapper">
+          <div className="status-progress-wrapper" aria-label={`Scan progress: attempt ${status.attempt} of ${status.maxAttempts}`}>
             <div className="status-progress-labels">
               <span>
-                Scan Attempt {status.attempt} of {status.maxAttempts}
+                Attempt {status.attempt} / {status.maxAttempts}
               </span>
               {status.nextRetryInSeconds !== undefined && (
-                <span>Next refresh in {status.nextRetryInSeconds}s</span>
+                <span>Next in {status.nextRetryInSeconds}s</span>
               )}
             </div>
             <div className="status-progress-bar">
@@ -110,7 +116,7 @@ export const LiveConsole: React.FC<LiveConsoleProps> = ({
       <div className="console-stream-box">
         <div className="console-header">
           <div className="console-title">
-            <Terminal size={15} />
+            <Terminal size={15} aria-hidden="true" />
             <span>Live Automation Log</span>
           </div>
           <div className="console-header-actions">
@@ -118,9 +124,11 @@ export const LiveConsole: React.FC<LiveConsoleProps> = ({
               type="button"
               className="btn-clear-console"
               onClick={onClearLogs}
-              title="Clear Console"
+              title="Clear Console Logs"
+              aria-label="Clear Console Logs"
             >
-              <Trash2 size={13} /> Clear
+              <Trash2 size={13} aria-hidden="true" />
+              <span>Clear</span>
             </button>
             {onHide && (
               <button
@@ -128,17 +136,18 @@ export const LiveConsole: React.FC<LiveConsoleProps> = ({
                 className="btn-hide-console"
                 onClick={onHide}
                 title="Hide Live Terminal"
+                aria-label="Hide Live Terminal"
               >
-                <PanelRightClose size={14} />
+                <PanelRightClose size={14} aria-hidden="true" />
               </button>
             )}
           </div>
         </div>
 
-        <div className="console-entries-list">
+        <div className="console-entries-list" role="log" aria-live="polite">
           {logs.length === 0 ? (
             <div className="console-empty-state">
-              <Radio size={24} />
+              <Radio size={24} aria-hidden="true" />
               <span>Monitoring schedule in background...</span>
             </div>
           ) : (

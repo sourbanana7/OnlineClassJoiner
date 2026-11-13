@@ -1,4 +1,3 @@
-// Written and refined by Gemini - Continuing from previous agent's milestone
 // Preload script exposing typed Electron API to renderer process securely via contextBridge
 
 import { contextBridge, ipcRenderer } from 'electron';
@@ -9,6 +8,7 @@ import {
   ElectronAPI,
   ImportedCourse,
   LogEntry,
+  LogLevel,
   NextClassInfo,
 } from './types';
 
@@ -27,28 +27,42 @@ const api: ElectronAPI = {
   getBotStatus: () => ipcRenderer.invoke('bot:getStatus'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),
+  addLog: (level: LogLevel, message: string, courseCode?: string) =>
+    ipcRenderer.invoke('logs:add', level, message, courseCode),
   fetchClassroomCourses: () => ipcRenderer.invoke('classroom:fetchCourses'),
   syncClassroom: () => ipcRenderer.invoke('classroom:sync'),
   getNextClass: () => ipcRenderer.invoke('bot:getNextClass'),
+
+  // Window control IPC
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
 
   onStatusUpdate: (callback: (status: BotStatusPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: BotStatusPayload) =>
       callback(status);
     ipcRenderer.on('bot:statusUpdate', listener);
-    return () => ipcRenderer.removeListener('bot:statusUpdate', listener);
+    return () => {
+      ipcRenderer.removeListener('bot:statusUpdate', listener);
+    };
   },
 
   onNewLog: (callback: (log: LogEntry) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, log: LogEntry) => callback(log);
     ipcRenderer.on('logs:new', listener);
-    return () => ipcRenderer.removeListener('logs:new', listener);
+    return () => {
+      ipcRenderer.removeListener('logs:new', listener);
+    };
   },
 
   onClassesUpdated: (callback: (classes: ClassSchedule[]) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, classes: ClassSchedule[]) =>
       callback(classes);
     ipcRenderer.on('classes:updated', listener);
-    return () => ipcRenderer.removeListener('classes:updated', listener);
+    return () => {
+      ipcRenderer.removeListener('classes:updated', listener);
+    };
   },
 };
 

@@ -1,4 +1,3 @@
-// Written and refined by Gemini - Continuing from previous agent's milestone
 // Main React application component for Class Joiner dashboard, schedule management, and live monitor
 
 import React, { useEffect, useState, useCallback } from 'react';
@@ -19,6 +18,8 @@ import {
   Terminal,
   Sun,
   Moon,
+  Info,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -100,6 +101,7 @@ export const App: React.FC = () => {
   // Modal States
   const [isClassModalOpen, setIsClassModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
 
   // Form State for Adding/Editing a Class
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -223,7 +225,6 @@ export const App: React.FC = () => {
       endTime,
       enabled: true,
       autoLeaveAtEnd,
-      // When saving a schedule, clear the needsSchedule flag and mark configured
       needsSchedule: false,
       isScheduleConfigured: true,
     };
@@ -277,10 +278,10 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-shell">
-      {/* Simplified Header */}
-      <header className="iub-header">
+      {/* Header */}
+      <header className="iub-header" role="banner">
         <div className="brand-identity">
-          <div className="iub-crest-emblem" title="Classroom Class Joiner">
+          <div className="iub-crest-emblem" title="Classroom Class Joiner" aria-hidden="true">
             <BookOpen size={20} />
           </div>
           <div className="brand-titles">
@@ -291,8 +292,8 @@ export const App: React.FC = () => {
 
         <div className="header-right-controls">
           {/* Live System Clock Pill */}
-          <div className="live-clock-pill">
-            <Clock size={15} className="gold-icon" />
+          <div className="live-clock-pill" aria-label={`Current time: ${systemTime.toLocaleTimeString()}`}>
+            <Clock size={15} className="gold-icon" aria-hidden="true" />
             <span className="clock-day">
               {systemTime.toLocaleDateString('en-US', {
                 weekday: 'short',
@@ -300,7 +301,7 @@ export const App: React.FC = () => {
                 day: 'numeric',
               })}
             </span>
-            <span className="clock-divider">|</span>
+            <span className="clock-divider" aria-hidden="true">|</span>
             <span className="clock-time">
               {systemTime.toLocaleTimeString([], {
                 hour: '2-digit',
@@ -315,10 +316,12 @@ export const App: React.FC = () => {
             type="button"
             className={`btn-google-auth ${settings.isGoogleAuthenticated ? 'authenticated' : ''}`}
             onClick={handleGoogleLogin}
+            title={settings.isGoogleAuthenticated ? 'Google Session Saved' : 'Login with Google'}
+            aria-label={settings.isGoogleAuthenticated ? 'Google Session Active' : 'Login with Google'}
           >
-            <ShieldCheck size={16} />
-            <span>
-              {settings.isGoogleAuthenticated ? 'Google Session Saved' : 'Login with Google'}
+            <ShieldCheck size={16} aria-hidden="true" />
+            <span className="btn-text">
+              {settings.isGoogleAuthenticated ? 'Google Active' : 'Login Google'}
             </span>
           </button>
 
@@ -328,9 +331,11 @@ export const App: React.FC = () => {
             className={`btn-header-terminal ${isTerminalVisible ? 'active' : ''}`}
             onClick={toggleTerminal}
             title={isTerminalVisible ? 'Hide Live Terminal' : 'Show Live Terminal'}
+            aria-label={isTerminalVisible ? 'Hide Live Terminal' : 'Show Live Terminal'}
+            aria-expanded={isTerminalVisible}
           >
-            <Terminal size={16} />
-            <span>{isTerminalVisible ? 'Hide Terminal' : 'Show Terminal'}</span>
+            <Terminal size={16} aria-hidden="true" />
+            <span className="btn-text">{isTerminalVisible ? 'Hide Terminal' : 'Terminal'}</span>
           </button>
 
           {/* Light / Dark Mode Toggle Button */}
@@ -339,9 +344,10 @@ export const App: React.FC = () => {
             className="btn-header-theme"
             onClick={toggleTheme}
             title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
           >
-            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-            <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
+            {theme === 'dark' ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
+            <span className="btn-text">{theme === 'dark' ? 'Light' : 'Dark'}</span>
           </button>
 
           {/* Engine Settings Button */}
@@ -350,21 +356,22 @@ export const App: React.FC = () => {
             className="btn-header-settings"
             onClick={() => setIsSettingsModalOpen(true)}
             title="Automation Engine Settings"
+            aria-label="Automation Engine Settings"
           >
-            <Settings size={18} />
+            <Settings size={18} aria-hidden="true" />
           </button>
         </div>
       </header>
 
       {/* Main Content Workspace */}
-      <main className={`main-workspace ${!isTerminalVisible ? 'terminal-hidden' : ''}`}>
+      <main className={`main-workspace ${!isTerminalVisible ? 'terminal-hidden' : ''}`} role="main">
         {/* Left/Center Column: Scheduled Classes Dashboard */}
-        <section className="dashboard-column">
+        <section className="dashboard-column" aria-label="Course Schedules Dashboard">
           {/* Next Class Countdown Banner */}
           {nextClass && (
-            <div className="next-class-banner">
+            <div className="next-class-banner" role="region" aria-label="Upcoming Scheduled Class">
               <div className="next-class-info">
-                <Bell size={20} className="next-class-icon" />
+                <Bell size={20} className="next-class-icon" aria-hidden="true" />
                 <div className="next-class-details">
                   <h4>Next: {nextClass.courseCode} — {nextClass.courseName}</h4>
                   <p>Starts at {nextClass.startTime}</p>
@@ -378,7 +385,7 @@ export const App: React.FC = () => {
           )}
 
           <div className="dashboard-toolbar">
-            <div>
+            <div className="dashboard-toolbar-info">
               <h2 className="section-heading">Scheduled Courses</h2>
               <p className="section-subheading">
                 At class start time, the engine opens your Classroom page, scans for the Meet link every {settings.scanIntervalSeconds}s (up to {settings.maxScanDurationMinutes} mins), mutes Mic/Cam, and joins.
@@ -389,44 +396,49 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 className="btn-sync-classroom"
-                onClick={handleSyncClassroom}
-                disabled={isSyncing}
+                onClick={() => setIsSyncModalOpen(true)}
                 title="Sync courses from Google Classroom"
+                aria-label="Open Google Classroom sync dialog"
               >
-                <CloudDownload size={18} className={isSyncing ? 'spinning' : ''} />
-                <span>{isSyncing ? 'Syncing...' : 'Sync from Classroom'}</span>
+                <CloudDownload size={18} className={isSyncing ? 'spinning' : ''} aria-hidden="true" />
+                <span>{isSyncing ? 'Syncing...' : 'Sync Classroom'}</span>
               </button>
 
-              <button type="button" className="btn-add-class" onClick={openAddModal}>
-                <Plus size={18} />
+              <button
+                type="button"
+                className="btn-add-class"
+                onClick={openAddModal}
+                aria-label="Add new course schedule"
+              >
+                <Plus size={18} aria-hidden="true" />
                 <span>Add Course</span>
               </button>
             </div>
           </div>
 
           {/* Active Safety Status Pills */}
-          <div className="feature-Guarantee-bar">
+          <div className="feature-Guarantee-bar" role="status" aria-label="Automation Status Guardrails">
             <div className="guarantee-pill">
-              <MicOff size={14} />
-              <span>Auto-Mute Microphone: {settings.alwaysMuteMic ? 'ON' : 'OFF'}</span>
+              <MicOff size={14} aria-hidden="true" />
+              <span>Auto-Mute Mic: {settings.alwaysMuteMic ? 'ON' : 'OFF'}</span>
             </div>
             <div className="guarantee-pill">
-              <VideoOff size={14} />
+              <VideoOff size={14} aria-hidden="true" />
               <span>Auto-Camera Off: {settings.alwaysTurnOffCam ? 'ON' : 'OFF'}</span>
             </div>
             <div className="guarantee-pill">
-              <RefreshCw size={14} />
+              <RefreshCw size={14} aria-hidden="true" />
               <span>
-                Refresh & Scan: Every {settings.scanIntervalSeconds}s for {settings.maxScanDurationMinutes}m
+                Scan: Every {settings.scanIntervalSeconds}s for {settings.maxScanDurationMinutes}m
               </span>
             </div>
           </div>
 
           {/* Unconfigured / Imported Classes Section */}
           {unconfiguredClasses.length > 0 && (
-            <div className="unconfigured-section">
+            <div className="unconfigured-section" role="region" aria-label="Imported courses needing schedule">
               <div className="unconfigured-section-header">
-                <AlertTriangle size={16} />
+                <AlertTriangle size={16} aria-hidden="true" />
                 <span>Imported Courses — Set Schedule ({unconfiguredClasses.length})</span>
               </div>
               <div className="unconfigured-grid">
@@ -448,7 +460,7 @@ export const App: React.FC = () => {
           {/* Configured Classes */}
           {configuredClasses.length === 0 && unconfiguredClasses.length === 0 ? (
             <div className="empty-dashboard-card">
-              <CloudDownload size={42} className="empty-icon" />
+              <CloudDownload size={42} className="empty-icon" aria-hidden="true" />
               <h3>No Classes Configured Yet</h3>
               <p>
                 Sync your classes from Google Classroom to get started, or add a course manually.
@@ -456,11 +468,10 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 className="btn-sync-classroom"
-                onClick={handleSyncClassroom}
-                disabled={isSyncing}
+                onClick={() => setIsSyncModalOpen(true)}
               >
-                <CloudDownload size={18} className={isSyncing ? 'spinning' : ''} />
-                <span>{isSyncing ? 'Syncing...' : 'Sync from Google Classroom'}</span>
+                <CloudDownload size={18} className={isSyncing ? 'spinning' : ''} aria-hidden="true" />
+                <span>Sync from Google Classroom</span>
               </button>
             </div>
           ) : configuredClasses.length > 0 ? (
@@ -484,8 +495,11 @@ export const App: React.FC = () => {
           ) : null}
         </section>
 
-        {/* Right Column: Live Status Monitor & Real-Time Log Console */}
-        {isTerminalVisible && (
+        {/* Right Column: Sticky Live Status Monitor & Real-Time Log Console */}
+        <div
+          className={`console-sidebar-wrapper ${!isTerminalVisible ? 'is-collapsed' : ''}`}
+          aria-hidden={!isTerminalVisible}
+        >
           <LiveConsole
             status={botStatus}
             logs={logs}
@@ -496,8 +510,20 @@ export const App: React.FC = () => {
               localStorage.setItem('class_joiner_terminal_visible', 'false');
             }}
           />
-        )}
+        </div>
       </main>
+
+      {/* Mobile Backdrop for Console Sheet */}
+      {isTerminalVisible && (
+        <div
+          className="console-mobile-backdrop"
+          onClick={() => {
+            setIsTerminalVisible(false);
+            localStorage.setItem('class_joiner_terminal_visible', 'false');
+          }}
+          aria-hidden="true"
+        />
+      )}
 
       {/* Floating Console Toggle Button when Terminal is Hidden */}
       {!isTerminalVisible && (
@@ -509,19 +535,30 @@ export const App: React.FC = () => {
             localStorage.setItem('class_joiner_terminal_visible', 'true');
           }}
           title="Open Live Terminal & Automation Monitor"
+          aria-label="Open Live Terminal & Automation Monitor"
         >
-          <span className={`pulse-dot-mini ${botStatus.state.toLowerCase()}`} />
-          <Terminal size={15} />
+          <span className={`pulse-dot-mini ${botStatus.state.toLowerCase()}`} aria-hidden="true" />
+          <Terminal size={15} aria-hidden="true" />
           <span>Live Terminal</span>
         </button>
       )}
 
-      {/* Add / Edit Class Modal with Dedicated Visual Clock TimePicker */}
+      {/* ==================== MODAL 1: ADD / EDIT CLASS MODAL ==================== */}
       {isClassModalOpen && (
-        <div className="modal-backdrop">
-          <div className="modal-window">
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsClassModalOpen(false);
+          }}
+        >
+          <div
+            className="modal-window"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="class-modal-heading"
+          >
             <div className="modal-header">
-              <h2>
+              <h2 id="class-modal-heading">
                 {editingId
                   ? editingNeedsSchedule
                     ? 'Set Course Schedule'
@@ -532,75 +569,87 @@ export const App: React.FC = () => {
                 type="button"
                 className="btn-close-modal"
                 onClick={() => setIsClassModalOpen(false)}
+                title="Close modal"
+                aria-label="Close modal"
               >
-                <X size={20} />
+                <X size={20} aria-hidden="true" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveClass} className="modal-body-form">
-              {formError && <div className="form-error-banner">{formError}</div>}
+            <form onSubmit={handleSaveClass} className="modal-form-wrapper">
+              <div className="modal-body-scroll">
+                {formError && <div className="form-error-banner" role="alert">{formError}</div>}
 
-              <div className="form-row-three">
-                <div className="form-group">
-                  <label>Course Code *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g., CSE 203"
-                    value={courseCode}
-                    onChange={(e) => setCourseCode(e.target.value)}
-                  />
+                <div className="form-row-three">
+                  <div className="form-group">
+                    <label htmlFor="course-code-input">Course Code *</label>
+                    <input
+                      id="course-code-input"
+                      type="text"
+                      placeholder="e.g., CSE 203"
+                      value={courseCode}
+                      onChange={(e) => setCourseCode(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="course-title-input">Course Title *</label>
+                    <input
+                      id="course-title-input"
+                      type="text"
+                      placeholder="e.g., Data Structures"
+                      value={courseName}
+                      onChange={(e) => setCourseName(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="course-section-input">Section</label>
+                    <input
+                      id="course-section-input"
+                      type="text"
+                      placeholder="e.g., Sec 2"
+                      value={section}
+                      onChange={(e) => setSection(e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div className="form-group">
-                  <label>Course Title *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g., Data Structures"
-                    value={courseName}
-                    onChange={(e) => setCourseName(e.target.value)}
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Section</label>
-                  <input
-                    type="text"
-                    placeholder="e.g., Sec 2"
-                    value={section}
-                    onChange={(e) => setSection(e.target.value)}
-                  />
-                </div>
-              </div>
 
-              <div className="form-group">
-                <label>Google Classroom Course URL *</label>
-                <input
-                  type="url"
-                  placeholder="https://classroom.google.com/u/0/c/..."
-                  value={classroomUrl}
-                  onChange={(e) => setClassroomUrl(e.target.value)}
+                <div className="form-group">
+                  <label htmlFor="classroom-url-input">Google Classroom Course URL *</label>
+                  <input
+                    id="classroom-url-input"
+                    type="url"
+                    placeholder="https://classroom.google.com/u/0/c/..."
+                    value={classroomUrl}
+                    onChange={(e) => setClassroomUrl(e.target.value)}
+                    required
+                  />
+                  <small>Paste the full URL to the course homepage in Google Classroom</small>
+                </div>
+
+                {/* Dedicated Visual Clock & Day Picker Component */}
+                <TimePicker
+                  selectedDays={days}
+                  onChangeDays={setDays}
+                  startTime={startTime}
+                  onChangeStartTime={setStartTime}
+                  endTime={endTime}
+                  onChangeEndTime={setEndTime}
                 />
-              </div>
 
-              {/* Dedicated Visual Clock & Day Picker Component */}
-              <TimePicker
-                selectedDays={days}
-                onChangeDays={setDays}
-                startTime={startTime}
-                onChangeStartTime={setStartTime}
-                endTime={endTime}
-                onChangeEndTime={setEndTime}
-              />
-
-              <div className="form-checkbox-row">
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={autoLeaveAtEnd}
-                    onChange={(e) => setAutoLeaveAtEnd(e.target.checked)}
-                  />
-                  <span>
-                    Automatically leave Google Meet call when End Time ({endTime}) is reached
-                  </span>
-                </label>
+                <div className="form-checkbox-row">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={autoLeaveAtEnd}
+                      onChange={(e) => setAutoLeaveAtEnd(e.target.checked)}
+                    />
+                    <span>
+                      Automatically leave Google Meet call when End Time ({endTime}) is reached
+                    </span>
+                  </label>
+                </div>
               </div>
 
               <div className="modal-footer">
@@ -612,7 +661,7 @@ export const App: React.FC = () => {
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary-gold">
-                  <Check size={17} />
+                  <Check size={17} aria-hidden="true" />
                   <span>
                     {editingId
                       ? editingNeedsSchedule
@@ -627,26 +676,39 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Automation Settings Modal */}
+      {/* ==================== MODAL 2: SETTINGS MODAL ==================== */}
       {isSettingsModalOpen && (
-        <div className="modal-backdrop">
-          <div className="modal-window settings-modal">
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsSettingsModalOpen(false);
+          }}
+        >
+          <div
+            className="modal-window settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-modal-heading"
+          >
             <div className="modal-header">
-              <h2>Refresh & Scan Engine Settings</h2>
+              <h2 id="settings-modal-heading">Refresh & Scan Engine Settings</h2>
               <button
                 type="button"
                 className="btn-close-modal"
                 onClick={() => setIsSettingsModalOpen(false)}
+                title="Close settings"
+                aria-label="Close settings"
               >
-                <X size={20} />
+                <X size={20} aria-hidden="true" />
               </button>
             </div>
 
-            <div className="modal-body-form">
+            <div className="modal-body-scroll">
               <div className="form-row-two">
                 <div className="form-group">
-                  <label>Auto-Refresh Interval (Seconds)</label>
+                  <label htmlFor="scan-interval-input">Auto-Refresh Interval (Seconds)</label>
                   <input
+                    id="scan-interval-input"
                     type="number"
                     min={10}
                     max={120}
@@ -661,8 +723,9 @@ export const App: React.FC = () => {
                 </div>
 
                 <div className="form-group">
-                  <label>Maximum Scan Window (Minutes)</label>
+                  <label htmlFor="max-scan-duration-input">Maximum Scan Window (Minutes)</label>
                   <input
+                    id="max-scan-duration-input"
                     type="number"
                     min={1}
                     max={30}
@@ -702,16 +765,141 @@ export const App: React.FC = () => {
                   <span>Always turn off Camera before clicking "Join now"</span>
                 </label>
               </div>
+            </div>
 
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="btn-primary-gold"
-                  onClick={() => setIsSettingsModalOpen(false)}
-                >
-                  <Check size={16} /> Done
-                </button>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-primary-gold"
+                onClick={() => setIsSettingsModalOpen(false)}
+              >
+                <Check size={16} aria-hidden="true" />
+                <span>Done</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL 3: SYNC COURSES MODAL ==================== */}
+      {isSyncModalOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsSyncModalOpen(false);
+          }}
+        >
+          <div
+            className="modal-window sync-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sync-modal-heading"
+          >
+            <div className="modal-header">
+              <h2 id="sync-modal-heading">Sync with Google Classroom</h2>
+              <button
+                type="button"
+                className="btn-close-modal"
+                onClick={() => setIsSyncModalOpen(false)}
+                title="Close sync dialog"
+                aria-label="Close sync dialog"
+              >
+                <X size={20} aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="modal-body-scroll">
+              <div className="sync-explanation-box">
+                <div className="sync-icon-badge">
+                  <CloudDownload size={28} />
+                </div>
+                <div className="sync-text-group">
+                  <h4>Automated Classroom Course Discovery</h4>
+                  <p>
+                    The automation engine launches a background browser session to read your enrolled courses directly from Google Classroom, extracting course names, codes, and homepage URLs.
+                  </p>
+                </div>
               </div>
+
+              {/* Google Session Check */}
+              <div className={`sync-status-card ${settings.isGoogleAuthenticated ? 'connected' : 'needs-auth'}`}>
+                <div className="sync-status-info">
+                  {settings.isGoogleAuthenticated ? (
+                    <CheckCircle2 size={18} className="sync-check-icon" />
+                  ) : (
+                    <AlertTriangle size={18} className="sync-warn-icon" />
+                  )}
+                  <div>
+                    <strong>
+                      {settings.isGoogleAuthenticated
+                        ? 'Google Account Connected'
+                        : 'Google Login Required'}
+                    </strong>
+                    <p>
+                      {settings.isGoogleAuthenticated
+                        ? 'Your Google browser profile is saved and ready for course extraction.'
+                        : 'Sign in to Google first so the browser can view your Classroom courses.'}
+                    </p>
+                  </div>
+                </div>
+
+                {!settings.isGoogleAuthenticated && (
+                  <button
+                    type="button"
+                    className="btn-google-auth"
+                    onClick={handleGoogleLogin}
+                  >
+                    <ShieldCheck size={15} />
+                    <span>Login with Google</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Live Sync Status indicator */}
+              {isSyncing && (
+                <div className="sync-in-progress-card">
+                  <RefreshCw size={22} className="spinning sync-spin-icon" />
+                  <div>
+                    <strong>Syncing Courses in Background...</strong>
+                    <p>{botStatus.message || 'Connecting to Google Classroom...'}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Sync Tips & Advice */}
+              <div className="sync-tips-list">
+                <div className="sync-tip-item">
+                  <Info size={15} className="tip-icon" />
+                  <span>
+                    Imported courses appear under <em>"Imported Courses — Set Schedule"</em> where you can assign their class days and start times.
+                  </span>
+                </div>
+                <div className="sync-tip-item">
+                  <Info size={15} className="tip-icon" />
+                  <span>
+                    Existing courses with schedules already configured will not be overwritten or deleted.
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setIsSyncModalOpen(false)}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                className="btn-primary-gold"
+                onClick={handleSyncClassroom}
+                disabled={isSyncing}
+              >
+                <CloudDownload size={17} className={isSyncing ? 'spinning' : ''} aria-hidden="true" />
+                <span>{isSyncing ? 'Syncing Courses...' : 'Start Classroom Sync'}</span>
+              </button>
             </div>
           </div>
         </div>

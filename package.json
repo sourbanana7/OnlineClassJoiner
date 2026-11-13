@@ -11,6 +11,8 @@
     "dev": "concurrently -k \"npm:dev:vite\" \"npm:dev:electron\"",
     "build": "tsc -p tsconfig.json && vite build && tsc -p tsconfig.node.json",
     "build:web": "vite build",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "preview": "vite preview",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",

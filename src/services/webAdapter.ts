@@ -175,55 +175,78 @@ export function createWebAdapter(): ElectronAPI {
   // Web background scheduler: triggers chime and notification when scheduled class starts
   let lastCheckedMinute = '';
   setInterval(() => {
-    const now = new Date();
-    const currentDay = DAY_MAP[now.getDay()];
-    const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const todayYMD = now.toISOString().slice(0, 10);
+    try {
+      const now = new Date();
+      const currentDay = DAY_MAP[now.getDay()];
+      const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(
+        now.getMinutes()
+      ).padStart(2, '0')}`;
+      const todayYMD = now.toISOString().slice(0, 10);
 
-    if (lastCheckedMinute === currentHHMM) return;
-    lastCheckedMinute = currentHHMM;
+      if (lastCheckedMinute === currentHHMM) return;
+      lastCheckedMinute = currentHHMM;
 
-    const currentClasses = loadClasses();
-    for (const cls of currentClasses) {
-      if (!cls.enabled || cls.needsSchedule) continue;
-      if (!cls.days.includes(currentDay)) continue;
+      const currentClasses = loadClasses();
+      for (const cls of currentClasses) {
+        if (!cls.enabled || cls.needsSchedule || cls.isScheduleConfigured === false) continue;
+        if (!Array.isArray(cls.days) || !cls.days.includes(currentDay)) continue;
+        if (!cls.startTime || typeof cls.startTime !== 'string') continue;
 
-      if (cls.startTime === currentHHMM && cls.lastJoinedDate !== todayYMD) {
-        cls.lastJoinedDate = todayYMD;
-        saveStoredClasses(currentClasses);
+        if (cls.startTime === currentHHMM && cls.lastJoinedDate !== todayYMD) {
+          cls.lastJoinedDate = todayYMD;
+          saveStoredClasses(currentClasses);
 
-        playNotificationChime();
-        emitLog('info', `Scheduled time reached for ${cls.courseCode} (${cls.courseName})`, cls.courseCode);
+          playNotificationChime();
+          emitLog(
+            'info',
+            `Scheduled time reached for ${cls.courseCode} (${cls.courseName})`,
+            cls.courseCode
+          );
 
-        emitStatus({
-          state: 'JOINING_MEET',
-          activeClassId: cls.id,
-          activeClassName: `${cls.courseCode} — ${cls.courseName}`,
-          message: `Class starting now! Opening ${cls.courseCode}...`,
-        });
-
-        // Trigger browser notification
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(`Class Starting: ${cls.courseCode}`, {
-            body: `${cls.courseName} begins now (${cls.startTime}). Opening classroom link...`,
-          });
-        }
-
-        // Open course URL in a new tab
-        if (cls.classroomUrl) {
-          window.open(cls.classroomUrl, '_blank');
-        }
-
-        setTimeout(() => {
           emitStatus({
-            state: 'IN_CLASS',
+            state: 'JOINING_MEET',
             activeClassId: cls.id,
             activeClassName: `${cls.courseCode} — ${cls.courseName}`,
-            message: `Currently in class: ${cls.courseCode}. Remember to keep Mic & Cam off.`,
+            message: `Class starting now! Opening ${cls.courseCode}...`,
           });
-          emitLog('success', `Class tab opened for ${cls.courseCode}. Attendance session active.`, cls.courseCode);
-        }, 2000);
+
+          // Trigger browser notification
+          if ('Notification' in window && Notification.permission === 'granted') {
+            try {
+              new Notification(`Class Starting: ${cls.courseCode}`, {
+                body: `${cls.courseName} begins now (${cls.startTime}). Opening classroom link...`,
+              });
+            } catch {
+              // Ignore notification errors
+            }
+          }
+
+          // Open course URL in a new tab
+          if (cls.classroomUrl) {
+            try {
+              window.open(cls.classroomUrl, '_blank');
+            } catch {
+              // Ignore popup errors
+            }
+          }
+
+          setTimeout(() => {
+            emitStatus({
+              state: 'IN_CLASS',
+              activeClassId: cls.id,
+              activeClassName: `${cls.courseCode} — ${cls.courseName}`,
+              message: `Currently in class: ${cls.courseCode}. Remember to keep Mic & Cam off.`,
+            });
+            emitLog(
+              'success',
+              `Class tab opened for ${cls.courseCode}. Attendance session active.`,
+              cls.courseCode
+            );
+          }, 2000);
+        }
       }
+    } catch {
+      // Guard against background loop exceptions
     }
   }, 3000);
 
@@ -263,7 +286,11 @@ export function createWebAdapter(): ElectronAPI {
       if (found) {
         found.enabled = enabled;
         saveStoredClasses(list);
-        emitLog('info', `${found.courseCode} auto-join is now ${enabled ? 'ENABLED' : 'DISABLED'}.`, found.courseCode);
+        emitLog(
+          'info',
+          `${found.courseCode} auto-join is now ${enabled ? 'ENABLED' : 'DISABLED'}.`,
+          found.courseCode
+        );
       }
       return list;
     },
@@ -312,7 +339,11 @@ export function createWebAdapter(): ElectronAPI {
         });
 
         if (target.classroomUrl) {
-          window.open(target.classroomUrl, '_blank');
+          try {
+            window.open(target.classroomUrl, '_blank');
+          } catch {
+            // Popup blocker fallback
+          }
         }
 
         setTimeout(() => {
@@ -322,7 +353,11 @@ export function createWebAdapter(): ElectronAPI {
             activeClassName: `${target.courseCode} — ${target.courseName}`,
             message: `Class opened in browser tab.`,
           });
-          emitLog('success', `Class link launched in active tab. Mic & Cam mute reminder active.`, target.courseCode);
+          emitLog(
+            'success',
+            `Class link launched in active tab. Mic & Cam mute reminder active.`,
+            target.courseCode
+          );
         }, 1200);
       }, 1000);
     },
@@ -347,7 +382,14 @@ export function createWebAdapter(): ElectronAPI {
     },
 
     fetchClassroomCourses: async (): Promise<ImportedCourse[]> => {
-      return [];
+      const list = loadClasses();
+      return list.map((c) => ({
+        id: c.googleClassroomId || c.id,
+        name: c.courseName,
+        section: c.section,
+        url: c.classroomUrl,
+        courseCode: c.courseCode,
+      }));
     },
 
     syncClassroom: async (): Promise<ClassSchedule[]> => {
@@ -360,7 +402,11 @@ export function createWebAdapter(): ElectronAPI {
       });
 
       // Open Google Classroom in new tab for user convenience
-      window.open('https://classroom.google.com', '_blank');
+      try {
+        window.open('https://classroom.google.com/u/0/h', '_blank');
+      } catch {
+        // Popup safety
+      }
 
       setTimeout(() => {
         emitStatus({
@@ -376,7 +422,16 @@ export function createWebAdapter(): ElectronAPI {
     },
 
     getNextClass: async (): Promise<NextClassInfo | null> => {
-      const classes = loadClasses().filter((cls) => cls.enabled && !cls.needsSchedule);
+      const classes = loadClasses().filter(
+        (cls) =>
+          cls.enabled &&
+          !cls.needsSchedule &&
+          cls.isScheduleConfigured !== false &&
+          Array.isArray(cls.days) &&
+          cls.days.length > 0 &&
+          typeof cls.startTime === 'string' &&
+          cls.startTime.includes(':')
+      );
       if (classes.length === 0) return null;
 
       const now = new Date();
@@ -384,40 +439,33 @@ export function createWebAdapter(): ElectronAPI {
       const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
       let closest: { cls: ClassSchedule; minutesUntil: number } | null = null;
+      let bestMinutes = Infinity;
 
       for (const cls of classes) {
-        if (!cls.days.includes(currentDay)) continue;
-
-        const [h, m] = cls.startTime.split(':').map((n) => parseInt(n, 10) || 0);
+        const parts = cls.startTime.split(':').map(Number);
+        if (parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) continue;
+        const [h, m] = parts;
         const classMinutes = h * 60 + m;
-        const diff = classMinutes - currentMinutes;
 
-        // If today and in future (or starting right now)
-        if (diff >= -5) {
-          if (!closest || diff < closest.minutesUntil) {
+        for (let dayOffset = 0; dayOffset < 7; dayOffset++) {
+          const checkDayIndex = (now.getDay() + dayOffset) % 7;
+          const checkDay = DAY_MAP[checkDayIndex];
+
+          if (!cls.days.includes(checkDay)) continue;
+
+          let diff: number;
+          if (dayOffset === 0) {
+            diff = classMinutes - currentMinutes;
+            if (diff < -5) continue; // More than 5 minutes past start today
+          } else {
+            diff = dayOffset * 24 * 60 + classMinutes - currentMinutes;
+          }
+
+          if (diff >= -5 && diff < bestMinutes) {
+            bestMinutes = diff;
             closest = { cls, minutesUntil: Math.max(0, diff) };
           }
-        }
-      }
-
-      // If no more classes today, find next upcoming day
-      if (!closest) {
-        for (let daysAhead = 1; daysAhead <= 7; daysAhead++) {
-          const nextDayIndex = (now.getDay() + daysAhead) % 7;
-          const targetDay = DAY_MAP[nextDayIndex];
-
-          for (const cls of classes) {
-            if (cls.days.includes(targetDay)) {
-              const [h, m] = cls.startTime.split(':').map((n) => parseInt(n, 10) || 0);
-              const classMinutes = h * 60 + m;
-              const minutesUntil = daysAhead * 24 * 60 - currentMinutes + classMinutes;
-
-              if (!closest || minutesUntil < closest.minutesUntil) {
-                closest = { cls, minutesUntil };
-              }
-            }
-          }
-          if (closest) break;
+          break;
         }
       }
 

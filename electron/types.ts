@@ -1,4 +1,3 @@
-// Written and refined by Gemini - Continuing from previous agent's milestone
 // Type definitions for IUB Class Joiner automation engine and IPC bridge
 
 export type DayOfWeek = 'Sun' | 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat';
@@ -73,6 +72,14 @@ export interface AppSettings {
   isGoogleAuthenticated: boolean;
 }
 
+export interface WindowBounds {
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+  isMaximized?: boolean;
+}
+
 export interface ElectronAPI {
   getClasses: () => Promise<ClassSchedule[]>;
   saveClass: (cls: ClassSchedule) => Promise<ClassSchedule[]>;
@@ -86,9 +93,16 @@ export interface ElectronAPI {
   getBotStatus: () => Promise<BotStatusPayload>;
   getLogs: () => Promise<LogEntry[]>;
   clearLogs: () => Promise<void>;
+  addLog?: (level: LogLevel, message: string, courseCode?: string) => Promise<LogEntry[]>;
   fetchClassroomCourses: () => Promise<ImportedCourse[]>;
   syncClassroom: () => Promise<ClassSchedule[]>;
   getNextClass: () => Promise<NextClassInfo | null>;
+  // Window controls
+  minimizeWindow?: () => Promise<void>;
+  maximizeWindow?: () => Promise<void>;
+  closeWindow?: () => Promise<void>;
+  isMaximized?: () => Promise<boolean>;
+  // Event subscriptions
   onStatusUpdate: (callback: (status: BotStatusPayload) => void) => () => void;
   onNewLog: (callback: (log: LogEntry) => void) => () => void;
   onClassesUpdated: (callback: (classes: ClassSchedule[]) => void) => () => void;

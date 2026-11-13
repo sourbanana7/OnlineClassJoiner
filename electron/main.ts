@@ -1,27 +1,120 @@
-// Written and refined by Gemini - Continuing from previous agent's milestone
 // Main Electron process coordinating window lifecycle, IPC handlers, scheduler, and Google Classroom automation
 
-import { app, BrowserWindow, ipcMain, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification, screen } from 'electron';
 import * as path from 'path';
 import { ConfigStore } from './store';
 import { AutomationEngine } from './automation';
-import { ClassScheduler } from './scheduler';
-import { AppSettings, ClassSchedule, ImportedCourse } from './types';
+import { ClassScheduler, parseTimeTo24H } from './scheduler';
+import { AppSettings, ClassSchedule, ImportedCourse, LogLevel, WindowBounds } from './types';
 
 let mainWindow: BrowserWindow | null = null;
 let store: ConfigStore;
 let engine: AutomationEngine;
 let scheduler: ClassScheduler;
+let saveBoundsTimeout: NodeJS.Timeout | null = null;
+
+const DEFAULT_WIDTH = 1200;
+const DEFAULT_HEIGHT = 750;
+const MIN_WIDTH = 800;
+const MIN_HEIGHT = 560;
+
+/**
+ * Safely sends an IPC event to the renderer process, guarding against destroyed instances.
+ */
+function safeSendToRenderer(channel: string, ...args: any[]): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    try {
+      mainWindow.webContents.send(channel, ...args);
+    } catch (err) {
+      console.warn(`[IPC] Failed to send on channel "${channel}":`, err);
+    }
+  }
+}
+
+/**
+ * Validates saved bounds against active display work areas to avoid off-screen placement.
+ */
+function getSafeWindowBounds(saved?: WindowBounds): {
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+  isMaximized?: boolean;
+} {
+  if (!saved) {
+    return { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+  }
+
+  const width = Math.max(MIN_WIDTH, saved.width || DEFAULT_WIDTH);
+  const height = Math.max(MIN_HEIGHT, saved.height || DEFAULT_HEIGHT);
+
+  // If coordinates were saved, verify they are visible on an active monitor
+  if (typeof saved.x === 'number' && typeof saved.y === 'number') {
+    const displays = screen.getAllDisplays();
+    const isVisibleOnAnyDisplay = displays.some((d) => {
+      const { x, y, width: dW, height: dH } = d.workArea;
+      return (
+        saved.x! + width >= x + 100 &&
+        saved.x! <= x + dW - 100 &&
+        saved.y! + height >= y + 100 &&
+        saved.y! <= y + dH - 100
+      );
+    });
+
+    if (isVisibleOnAnyDisplay) {
+      return { x: saved.x, y: saved.y, width, height, isMaximized: saved.isMaximized };
+    }
+  }
+
+  return { width, height, isMaximized: saved.isMaximized };
+}
+
+function saveCurrentWindowBounds(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const isMaximized = mainWindow.isMaximized();
+  if (isMaximized) {
+    const prev = store.getWindowBounds();
+    store.saveWindowBounds({
+      x: prev?.x,
+      y: prev?.y,
+      width: prev?.width || DEFAULT_WIDTH,
+      height: prev?.height || DEFAULT_HEIGHT,
+      isMaximized: true,
+    });
+  } else {
+    const b = mainWindow.getBounds();
+    store.saveWindowBounds({
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      isMaximized: false,
+    });
+  }
+}
+
+function debouncedSaveBounds(): void {
+  if (saveBoundsTimeout) {
+    clearTimeout(saveBoundsTimeout);
+  }
+  saveBoundsTimeout = setTimeout(saveCurrentWindowBounds, 400);
+}
 
 function createWindow(): void {
+  const initialBounds = getSafeWindowBounds(store.getWindowBounds());
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 1024,
-    minHeight: 700,
+    x: initialBounds.x,
+    y: initialBounds.y,
+    width: initialBounds.width,
+    height: initialBounds.height,
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
     title: 'Classroom Class Joiner (Alpha) — Classroom & Meet Automation',
     backgroundColor: '#09090D',
     autoHideMenuBar: true,
+    show: false, // Prevents layout pop while sizing/restoring
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -35,6 +128,27 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
+
+  mainWindow.once('ready-to-show', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (initialBounds.isMaximized) {
+        mainWindow.maximize();
+      }
+      mainWindow.show();
+    }
+  });
+
+  // Track window resizing and movement to persist bounds
+  mainWindow.on('resize', debouncedSaveBounds);
+  mainWindow.on('move', debouncedSaveBounds);
+
+  mainWindow.on('close', () => {
+    if (saveBoundsTimeout) {
+      clearTimeout(saveBoundsTimeout);
+      saveBoundsTimeout = null;
+    }
+    saveCurrentWindowBounds();
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -56,36 +170,74 @@ app.whenReady().then(() => {
   engine = new AutomationEngine(
     store,
     (status) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('bot:statusUpdate', status);
-      }
+      safeSendToRenderer('bot:statusUpdate', status);
     },
     (log) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('logs:new', log);
-      }
+      safeSendToRenderer('logs:new', log);
     }
   );
 
-  scheduler = new ClassScheduler(store, engine, (updatedClasses) => {
+  scheduler = new ClassScheduler(
+    store,
+    engine,
+    (updatedClasses) => {
+      safeSendToRenderer('classes:updated', updatedClasses);
+    },
+    (title, body) => {
+      showSystemNotification(title, body);
+    }
+  );
+
+  // Window Controls IPC Handlers
+  ipcMain.handle('window:minimize', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('classes:updated', updatedClasses);
+      mainWindow.minimize();
     }
   });
 
-  // Register Core IPC Handlers
+  ipcMain.handle('window:maximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMaximized()) {
+        mainWindow.unmaximize();
+      } else {
+        mainWindow.maximize();
+      }
+    }
+  });
+
+  ipcMain.handle('window:close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.close();
+    }
+  });
+
+  ipcMain.handle('window:isMaximized', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      return mainWindow.isMaximized();
+    }
+    return false;
+  });
+
+  // Core Classes IPC Handlers
   ipcMain.handle('classes:get', () => store.getClasses());
 
   ipcMain.handle('classes:save', (_event, cls: ClassSchedule) => {
-    const updated = store.saveClass(cls);
+    // Normalize times if possible before saving
+    const parsedStart = parseTimeTo24H(cls.startTime);
+    const parsedEnd = parseTimeTo24H(cls.endTime);
+    const normalizedClass: ClassSchedule = {
+      ...cls,
+      startTime: parsedStart ? parsedStart.hhmm : cls.startTime,
+      endTime: parsedEnd ? parsedEnd.hhmm : cls.endTime,
+    };
+
+    const updated = store.saveClass(normalizedClass);
     engine.log(
       'info',
-      `Saved schedule for ${cls.courseCode} (${cls.days.join(', ')} @ ${cls.startTime})`,
-      cls.courseCode
+      `Saved schedule for ${normalizedClass.courseCode} (${normalizedClass.days.join(', ')} @ ${normalizedClass.startTime})`,
+      normalizedClass.courseCode
     );
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('classes:updated', updated);
-    }
+    safeSendToRenderer('classes:updated', updated);
     return updated;
   });
 
@@ -95,9 +247,7 @@ app.whenReady().then(() => {
     if (target) {
       engine.log('warn', `Deleted course schedule: ${target.courseCode}`, target.courseCode);
     }
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('classes:updated', updated);
-    }
+    safeSendToRenderer('classes:updated', updated);
     return updated;
   });
 
@@ -111,12 +261,11 @@ app.whenReady().then(() => {
         target.courseCode
       );
     }
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('classes:updated', updated);
-    }
+    safeSendToRenderer('classes:updated', updated);
     return updated;
   });
 
+  // Settings IPC Handlers
   ipcMain.handle('settings:get', () => store.getSettings());
 
   ipcMain.handle('settings:update', (_event, partial: Partial<AppSettings>) => {
@@ -125,6 +274,7 @@ app.whenReady().then(() => {
     return updated;
   });
 
+  // Auth & Bot Control IPC Handlers
   ipcMain.handle('auth:login', async () => {
     await engine.openGoogleAuthentication();
   });
@@ -132,7 +282,9 @@ app.whenReady().then(() => {
   ipcMain.handle('bot:triggerNow', async (_event, id: string) => {
     const cls = store.getClasses().find((c) => c.id === id);
     if (cls) {
-      void engine.runClassJoinWorkflow(cls);
+      void engine.runClassJoinWorkflow(cls).catch((err) => {
+        engine.log('error', `Error launching ${cls.courseCode}: ${err?.message || err}`, cls.courseCode);
+      });
     }
   });
 
@@ -141,10 +293,16 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('bot:getStatus', () => engine.getStatus());
+
+  // Console Logs IPC Handlers
   ipcMain.handle('logs:get', () => engine.getLogs());
   ipcMain.handle('logs:clear', () => engine.clearLogs());
+  ipcMain.handle('logs:add', (_event, level: LogLevel, message: string, courseCode?: string) => {
+    engine.log(level, message, courseCode);
+    return engine.getLogs();
+  });
 
-  // Google Classroom Integration Handlers (written by Gemini)
+  // Google Classroom Integration Handlers
   ipcMain.handle('classroom:fetchCourses', async () => {
     return engine.scrapeClassroomCourses();
   });
@@ -174,11 +332,22 @@ app.whenReady().then(() => {
       for (const course of courses) {
         const existing = existingMap.get(course.id);
         if (existing) {
-          // Keep existing schedule settings, but repair corrupt names/codes like "Home"
-          if (course.name && (existing.courseName === 'Home' || !existing.courseName || existing.courseName.startsWith('Course ') || course.name !== existing.courseName)) {
+          if (
+            course.name &&
+            (existing.courseName === 'Home' ||
+              !existing.courseName ||
+              existing.courseName.startsWith('Course ') ||
+              course.name !== existing.courseName)
+          ) {
             existing.courseName = course.name;
           }
-          if (course.courseCode && (!existing.courseCode || existing.courseCode === 'HOME' || existing.courseCode.startsWith('AUTUMN') || existing.courseCode.startsWith('COURSE'))) {
+          if (
+            course.courseCode &&
+            (!existing.courseCode ||
+              existing.courseCode === 'HOME' ||
+              existing.courseCode.startsWith('AUTUMN') ||
+              existing.courseCode.startsWith('COURSE'))
+          ) {
             existing.courseCode = course.courseCode;
           }
           if (course.section) {
@@ -188,7 +357,6 @@ app.whenReady().then(() => {
           existing.googleClassroomId = course.id;
           updatedCount++;
         } else {
-          // Infer an abbreviated course code from the course title if available
           let inferredCode = course.courseCode;
           if (!inferredCode) {
             const codeMatch = course.name.match(/\b([A-Z]{2,5})\s*[-_]?\s*([0-9]{3}[A-Z]?)\b/i);
@@ -206,7 +374,7 @@ app.whenReady().then(() => {
             section: course.section,
             classroomUrl: course.url,
             googleClassroomId: course.id,
-            days: ['Sun', 'Tue'], // Standard default, will be flagged for user configuration
+            days: ['Sun', 'Tue'],
             startTime: '09:40',
             endTime: '11:10',
             enabled: true,
@@ -227,10 +395,7 @@ app.whenReady().then(() => {
         `Classroom sync finished: ${importedCount} new course(s) imported, ${updatedCount} existing course(s) updated.`
       );
 
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('classes:updated', allUpdated);
-      }
-
+      safeSendToRenderer('classes:updated', allUpdated);
       return allUpdated;
     } catch (error: any) {
       const msg = error?.message || String(error);
@@ -240,7 +405,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('bot:getNextClass', () => {
-    return engine.getNextScheduledClass();
+    return ClassScheduler.calculateNextClass(store.getClasses()) || engine.getNextScheduledClass();
   });
 
   createWindow();

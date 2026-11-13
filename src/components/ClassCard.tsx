@@ -1,6 +1,3 @@
-// Written and refined by Gemini - Continuing from previous agent's milestone
-// Component rendering individual class cards with configured and unconfigured (needs schedule) states
-
 import React from 'react';
 import {
   Play,
@@ -42,7 +39,7 @@ export const ClassCard: React.FC<ClassCardProps> = ({
   // Render a special card for classes that need their schedule configured
   if (cls.needsSchedule) {
     return (
-      <div className="class-card needs-schedule">
+      <article className="class-card needs-schedule" aria-label={`Unscheduled course: ${cls.courseCode}`}>
         <div className="class-card-top">
           <div className="course-badges">
             <span className="course-code-badge">{cls.courseCode}</span>
@@ -53,10 +50,10 @@ export const ClassCard: React.FC<ClassCardProps> = ({
           </div>
         </div>
 
-        <h3 className="course-title">{cls.courseName}</h3>
+        <h3 className="course-title" title={cls.courseName}>{cls.courseName}</h3>
 
         <div className="course-url-box" title={cls.classroomUrl}>
-          <ExternalLink size={13} className="url-icon" />
+          <ExternalLink size={13} className="url-icon" aria-hidden="true" />
           <span className="url-text">{cls.classroomUrl}</span>
         </div>
 
@@ -65,9 +62,10 @@ export const ClassCard: React.FC<ClassCardProps> = ({
             type="button"
             className="btn-set-schedule"
             onClick={() => onEdit(cls)}
+            aria-label={`Configure schedule for ${cls.courseCode} - ${cls.courseName}`}
           >
             <CalendarClock size={15} />
-            Set Schedule
+            <span>Set Schedule</span>
           </button>
 
           <div className="card-icon-actions">
@@ -76,21 +74,23 @@ export const ClassCard: React.FC<ClassCardProps> = ({
               className="btn-icon-only delete"
               onClick={() => onDelete(cls.id)}
               title="Delete Class"
+              aria-label={`Delete ${cls.courseCode}`}
             >
               <Trash2 size={15} />
             </button>
           </div>
         </div>
-      </div>
+      </article>
     );
   }
 
   // Regular configured class card
   return (
-    <div
+    <article
       className={`class-card ${!cls.enabled ? 'disabled' : ''} ${
         isCurrentlyScanning ? 'active-scanning' : ''
       }`}
+      aria-label={`Course: ${cls.courseCode} - ${cls.courseName}`}
     >
       <div className="class-card-top">
         <div className="course-badges">
@@ -108,16 +108,17 @@ export const ClassCard: React.FC<ClassCardProps> = ({
             type="checkbox"
             checked={cls.enabled}
             onChange={(e) => onToggle(cls.id, e.target.checked)}
+            aria-label={`Enable automated join for ${cls.courseCode}`}
           />
           <span className="iub-slider" />
         </label>
       </div>
 
-      <h3 className="course-title">{cls.courseName}</h3>
+      <h3 className="course-title" title={cls.courseName}>{cls.courseName}</h3>
 
       <div className="course-schedule-meta">
         <div className="meta-row">
-          <Calendar size={15} className="meta-icon" />
+          <Calendar size={15} className="meta-icon" aria-hidden="true" />
           <div className="day-badges-inline">
             {cls.days.map((d) => (
               <span key={d} className="day-chip">
@@ -128,7 +129,7 @@ export const ClassCard: React.FC<ClassCardProps> = ({
         </div>
 
         <div className="meta-row">
-          <Clock size={15} className="meta-icon" />
+          <Clock size={15} className="meta-icon" aria-hidden="true" />
           <span className="time-range-text">
             {format12Hour(cls.startTime)} — {format12Hour(cls.endTime)}
           </span>
@@ -136,7 +137,7 @@ export const ClassCard: React.FC<ClassCardProps> = ({
       </div>
 
       <div className="course-url-box" title={cls.classroomUrl}>
-        <ExternalLink size={13} className="url-icon" />
+        <ExternalLink size={13} className="url-icon" aria-hidden="true" />
         <span className="url-text">{cls.classroomUrl}</span>
       </div>
 
@@ -147,9 +148,10 @@ export const ClassCard: React.FC<ClassCardProps> = ({
           onClick={() => onTriggerNow(cls.id)}
           disabled={isCurrentlyScanning}
           title="Immediately open Classroom, scan for Meet link, and join"
+          aria-label={`Immediately scan and join ${cls.courseCode}`}
         >
           <Play size={14} />
-          {isCurrentlyScanning ? 'Scanning Classroom...' : 'Scan & Join Now'}
+          <span>{isCurrentlyScanning ? 'Scanning Classroom...' : 'Scan & Join Now'}</span>
         </button>
 
         <div className="card-icon-actions">
@@ -158,6 +160,7 @@ export const ClassCard: React.FC<ClassCardProps> = ({
             className="btn-icon-only"
             onClick={() => onEdit(cls)}
             title="Edit Schedule"
+            aria-label={`Edit ${cls.courseCode} schedule`}
           >
             <Edit3 size={15} />
           </button>
@@ -166,11 +169,12 @@ export const ClassCard: React.FC<ClassCardProps> = ({
             className="btn-icon-only delete"
             onClick={() => onDelete(cls.id)}
             title="Delete Class"
+            aria-label={`Delete ${cls.courseCode}`}
           >
             <Trash2 size={15} />
           </button>
         </div>
       </div>
-    </div>
+    </article>
   );
 };
